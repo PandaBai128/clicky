@@ -23,6 +23,7 @@ struct CompanionScreenCapture {
 
 @MainActor
 enum CompanionScreenCaptureUtility {
+    private static let canonicalScreenshotLongEdgeInPixels = 2048
 
     /// Captures all connected displays as JPEG data, labeling each with
     /// whether the user's cursor is on that screen. This gives the AI
@@ -84,7 +85,7 @@ enum CompanionScreenCaptureUtility {
             // Coordinate pointing depends on small UI elements being legible to
             // the vision model. 1280px was fast but made menu bar and desktop
             // icons too small, causing rough coordinates from MiniMax.
-            let maxDimension = 2048
+            let maxDimension = canonicalScreenshotLongEdgeInPixels
             let aspectRatio = CGFloat(display.width) / CGFloat(display.height)
             if display.width >= display.height {
                 configuration.width = maxDimension

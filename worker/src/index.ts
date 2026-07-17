@@ -17,6 +17,7 @@ interface Env {
   MINIMAX_THINKING_TYPE?: string;
   MINIMAX_TTS_VOICE_ID?: string;
   MINIMAX_TTS_MODEL?: string;
+  MINIMAX_TTS_VOLUME?: string;
   TENCENT_ASR_APP_ID: string;
   TENCENT_ASR_SECRET_ID: string;
   TENCENT_ASR_SECRET_KEY: string;
@@ -25,6 +26,7 @@ interface Env {
 }
 
 const TENCENT_ASR_HOST = "asr.cloud.tencent.com";
+const defaultMiniMaxTTSVolume = 2.5;
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -126,7 +128,7 @@ async function handleTTS(request: Request, env: Env, minimaxTTSURL: string): Pro
       voice_setting: {
         voice_id: env.MINIMAX_TTS_VOICE_ID || "Chinese (Mandarin)_Warm_Bestie",
         speed: 1,
-        vol: 1,
+        vol: parseMiniMaxTTSVolume(env.MINIMAX_TTS_VOLUME),
         pitch: 0,
       },
       audio_setting: {
@@ -223,6 +225,15 @@ function makeHotwordList(keyterms: string[]): string | null {
     .filter((term) => term.length > 2);
 
   return normalizedKeyterms.length > 0 ? normalizedKeyterms.join(",") : null;
+}
+
+function parseMiniMaxTTSVolume(rawVolume: string | undefined): number {
+  const parsedVolume = Number(rawVolume || defaultMiniMaxTTSVolume);
+  if (!Number.isFinite(parsedVolume)) {
+    return defaultMiniMaxTTSVolume;
+  }
+
+  return Math.max(0, Math.min(parsedVolume, 10));
 }
 
 function makeSortedQueryString(params: Record<string, string>): string {

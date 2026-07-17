@@ -58,4 +58,46 @@ struct leanring_buddyTests {
         #expect(result.elementLabel == "三点菜单")
     }
 
+    @Test func ordinaryKnowledgeQuestionDoesNotRequestPointing() async throws {
+        #expect(!PointingRequestPolicy.shouldRequestPointing(
+            for: "Codex 最近更新了哪些功能？"
+        ))
+    }
+
+    @Test func copyableContentRequestDoesNotRequestPointing() async throws {
+        #expect(!PointingRequestPolicy.shouldRequestPointing(
+            for: "帮我写一段读取 JSON 的 Swift 代码"
+        ))
+    }
+
+    @Test func ordinaryQuestionAboutVisibleUIControlsDoesNotRequestPointing() async throws {
+        #expect(!PointingRequestPolicy.shouldRequestPointing(
+            for: "这个按钮为什么不能用？"
+        ))
+    }
+
+    @Test func nonVisualSearchDoesNotRequestPointing() async throws {
+        #expect(!PointingRequestPolicy.shouldRequestPointing(
+            for: "帮我找一下最近的 Codex 新闻"
+        ))
+    }
+
+    @Test func abstractProblemLocationDoesNotRequestPointing() async throws {
+        #expect(!PointingRequestPolicy.shouldRequestPointing(
+            for: "帮我定位这个 bug 的原因"
+        ))
+    }
+
+    @Test func explicitDesktopSearchRequestsPointing() async throws {
+        #expect(PointingRequestPolicy.shouldRequestPointing(
+            for: "帮我找一下桌面上的 Mavis 文件夹"
+        ))
+    }
+
+    @Test func explicitLocationQuestionRequestsPointing() async throws {
+        #expect(PointingRequestPolicy.shouldRequestPointing(
+            for: "Chrome 浏览器在哪儿？"
+        ))
+    }
+
 }

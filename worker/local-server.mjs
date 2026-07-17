@@ -10,6 +10,7 @@ const port = Number(env.PORT || 8787);
 const minimaxAPIHost = (env.MINIMAX_API_HOST || "https://api.minimax.io").replace(/\/+$/, "");
 const MINIMAX_MESSAGES_URL = `${minimaxAPIHost}/anthropic/v1/messages`;
 const MINIMAX_TTS_URL = `${minimaxAPIHost}/v1/t2a_v2`;
+const defaultMiniMaxTTSVolume = 2.5;
 
 const server = createServer(async (request, response) => {
   try {
@@ -116,7 +117,7 @@ async function handleTTS(request, response) {
       voice_setting: {
         voice_id: env.MINIMAX_TTS_VOICE_ID || "Chinese (Mandarin)_Warm_Bestie",
         speed: 1,
-        vol: 1,
+        vol: parseMiniMaxTTSVolume(env.MINIMAX_TTS_VOLUME),
         pitch: 0,
       },
       audio_setting: {
@@ -239,6 +240,15 @@ function requireEnv(requiredKeys) {
   if (missingKeys.length > 0) {
     throw new Error(`Missing environment variables: ${missingKeys.join(", ")}`);
   }
+}
+
+function parseMiniMaxTTSVolume(rawVolume) {
+  const parsedVolume = Number(rawVolume || defaultMiniMaxTTSVolume);
+  if (!Number.isFinite(parsedVolume)) {
+    return defaultMiniMaxTTSVolume;
+  }
+
+  return Math.max(0, Math.min(parsedVolume, 10));
 }
 
 async function readJSON(request) {

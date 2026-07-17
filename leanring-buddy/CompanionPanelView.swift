@@ -8,6 +8,7 @@
 //
 
 import AVFoundation
+import AppKit
 import SwiftUI
 
 struct CompanionPanelView: View {
@@ -35,6 +36,12 @@ struct CompanionPanelView: View {
                     .frame(height: 10)
 
                 voiceInputButton
+                    .padding(.horizontal, 16)
+
+                Spacer()
+                    .frame(height: 12)
+
+                conversationHistorySection
                     .padding(.horizontal, 16)
             }
 
@@ -624,6 +631,55 @@ struct CompanionPanelView: View {
         .pointerCursor()
     }
 
+    // MARK: - Conversation History
+
+    private var conversationHistorySection: some View {
+        let recentConversationHistory = Array(companionManager.visibleConversationHistory.reversed())
+
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Recent")
+                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                    .foregroundColor(DS.Colors.textTertiary)
+
+                Spacer()
+
+                if !recentConversationHistory.isEmpty {
+                    Text("\(recentConversationHistory.count)/10")
+                        .font(.system(size: 10, weight: .medium, design: .rounded))
+                        .foregroundColor(DS.Colors.textTertiary)
+                }
+            }
+
+            if recentConversationHistory.isEmpty {
+                Text("No conversations yet")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(DS.Colors.textTertiary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 9)
+                    .background(
+                        RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                            .fill(Color.white.opacity(0.04))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                            .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+                    )
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 8) {
+                        ForEach(recentConversationHistory) { conversationExchange in
+                            ConversationExchangeCard(conversationExchange: conversationExchange)
+                        }
+                    }
+                    .padding(.trailing, 2)
+                }
+                .frame(maxHeight: 220)
+            }
+        }
+    }
+
     // MARK: - DM Farza Button
 
     private var dmFarzaButton: some View {
@@ -741,4 +797,217 @@ struct CompanionPanelView: View {
         }
     }
 
+}
+
+private struct ConversationExchangeCard: View {
+    let conversationExchange: CompanionConversationExchange
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack {
+                    Text("You")
+                        .font(.system(size: 10, weight: .semibold, design: .rounded))
+                        .foregroundColor(DS.Colors.textTertiary)
+
+                    Spacer()
+
+                    Text(conversationExchange.createdAt, style: .time)
+                        .font(.system(size: 10, weight: .medium, design: .rounded))
+                        .foregroundColor(DS.Colors.textTertiary)
+                }
+
+                Text(conversationExchange.userTranscript)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(DS.Colors.textSecondary)
+                    .lineLimit(3)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Divider()
+                .background(DS.Colors.borderSubtle)
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("Clicky")
+                        .font(.system(size: 10, weight: .semibold, design: .rounded))
+                        .foregroundColor(DS.Colors.info)
+
+                    Spacer()
+
+                    ConversationCopyButton(
+                        title: "Copy reply",
+                        systemImageName: "doc.on.doc",
+                        textToCopy: conversationExchange.assistantResponse
+                    )
+                }
+
+                ForEach(responseSegments(from: conversationExchange.assistantResponse)) { responseSegment in
+                    switch responseSegment.kind {
+                    case .text:
+                        if !responseSegment.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            Text(responseSegment.content.trimmingCharacters(in: .whitespacesAndNewlines))
+                                .font(.system(size: 11))
+                                .foregroundColor(DS.Colors.textSecondary)
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    case .code(let language):
+                        ConversationCodeBlock(
+                            code: responseSegment.content,
+                            language: language
+                        )
+                    }
+                }
+            }
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                .fill(Color.white.opacity(0.045))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+        )
+    }
+
+    private func responseSegments(from responseText: String) -> [ConversationResponseSegment] {
+        let codeBlockPattern = #"```([A-Za-z0-9_+\-.#]*)?\s*\n?([\s\S]*?)```"#
+        guard let codeBlockRegex = try? NSRegularExpression(pattern: codeBlockPattern) else {
+            return [ConversationResponseSegment(kind: .text, content: responseText)]
+        }
+
+        let responseTextRange = NSRange(responseText.startIndex..., in: responseText)
+        let matches = codeBlockRegex.matches(in: responseText, range: responseTextRange)
+        guard !matches.isEmpty else {
+            return [ConversationResponseSegment(kind: .text, content: responseText)]
+        }
+
+        var segments: [ConversationResponseSegment] = []
+        var currentIndex = responseText.startIndex
+
+        for match in matches {
+            guard let fullMatchRange = Range(match.range, in: responseText) else { continue }
+
+            if currentIndex < fullMatchRange.lowerBound {
+                let textContent = String(responseText[currentIndex..<fullMatchRange.lowerBound])
+                segments.append(ConversationResponseSegment(kind: .text, content: textContent))
+            }
+
+            var language: String? = nil
+            if match.numberOfRanges > 1,
+               let languageRange = Range(match.range(at: 1), in: responseText) {
+                let parsedLanguage = String(responseText[languageRange])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                language = parsedLanguage.isEmpty ? nil : parsedLanguage
+            }
+
+            var codeContent = String(responseText[fullMatchRange])
+            if match.numberOfRanges > 2,
+               let codeRange = Range(match.range(at: 2), in: responseText) {
+                codeContent = String(responseText[codeRange])
+            }
+
+            segments.append(ConversationResponseSegment(
+                kind: .code(language: language),
+                content: codeContent.trimmingCharacters(in: .newlines)
+            ))
+            currentIndex = fullMatchRange.upperBound
+        }
+
+        if currentIndex < responseText.endIndex {
+            segments.append(ConversationResponseSegment(
+                kind: .text,
+                content: String(responseText[currentIndex..<responseText.endIndex])
+            ))
+        }
+
+        return segments
+    }
+}
+
+private struct ConversationResponseSegment: Identifiable {
+    enum SegmentKind {
+        case text
+        case code(language: String?)
+    }
+
+    let id = UUID()
+    let kind: SegmentKind
+    let content: String
+}
+
+private struct ConversationCodeBlock: View {
+    let code: String
+    let language: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                if let language {
+                    Text(language.uppercased())
+                        .font(.system(size: 9, weight: .semibold, design: .rounded))
+                        .foregroundColor(DS.Colors.textTertiary)
+                }
+
+                Spacer()
+
+                ConversationCopyButton(
+                    title: "Copy code",
+                    systemImageName: "doc.on.doc",
+                    textToCopy: code
+                )
+            }
+
+            ScrollView(.horizontal, showsIndicators: true) {
+                Text(code)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(DS.Colors.codeText)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .padding(.bottom, 2)
+            }
+        }
+        .padding(8)
+        .background(
+            RoundedRectangle(cornerRadius: DS.CornerRadius.small, style: .continuous)
+                .fill(Color.black.opacity(0.24))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: DS.CornerRadius.small, style: .continuous)
+                .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+        )
+    }
+}
+
+private struct ConversationCopyButton: View {
+    let title: String
+    let systemImageName: String
+    let textToCopy: String
+
+    var body: some View {
+        Button(action: {
+            copyToPasteboard(textToCopy)
+        }) {
+            Image(systemName: systemImageName)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(DS.Colors.textTertiary)
+                .frame(width: 20, height: 20)
+                .background(
+                    RoundedRectangle(cornerRadius: DS.CornerRadius.small, style: .continuous)
+                        .fill(Color.white.opacity(0.06))
+                )
+        }
+        .buttonStyle(.plain)
+        .help(title)
+        .pointerCursor()
+    }
+
+    private func copyToPasteboard(_ text: String) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+    }
 }

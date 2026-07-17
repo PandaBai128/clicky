@@ -273,6 +273,7 @@ final class BuddyDictationManager: NSObject, ObservableObject {
     private var hasFinishedCurrentDictationSession = false
     private var finalizeFallbackWorkItem: DispatchWorkItem?
     private var pendingStartRequestIdentifier = UUID()
+    private var activeTranscriptionSessionIdentifier = UUID()
     private var contextualKeyterms: [String] = []
     private var lastRecordedAudioPowerSampleDate = Date.distantPast
     private var activePermissionRequestTask: Task<Bool, Never>?
@@ -333,6 +334,7 @@ final class BuddyDictationManager: NSObject, ObservableObject {
 
     func cancelCurrentDictation(preserveDraftText: Bool = true) {
         pendingStartRequestIdentifier = UUID()
+        activeTranscriptionSessionIdentifier = UUID()
 
         guard isDictationInProgress else { return }
 
@@ -526,6 +528,8 @@ final class BuddyDictationManager: NSObject, ObservableObject {
     private func startRecognitionSession() async throws {
         activeTranscriptionSession?.cancel()
         activeTranscriptionSession = nil
+        let transcriptionSessionIdentifier = UUID()
+        activeTranscriptionSessionIdentifier = transcriptionSessionIdentifier
 
         clickyDebugLog("dictation opening-provider \(transcriptionProvider.displayName)")
         print("🎙️ BuddyDictationManager: opening transcription provider \(transcriptionProvider.displayName)")
@@ -534,12 +538,24 @@ final class BuddyDictationManager: NSObject, ObservableObject {
             keyterms: buildTranscriptionKeyterms(),
             onTranscriptUpdate: { [weak self] transcriptText in
                 Task { @MainActor in
-                    self?.latestRecognizedText = transcriptText
+                    guard let self,
+                          self.activeTranscriptionSessionIdentifier == transcriptionSessionIdentifier,
+                          !self.hasFinishedCurrentDictationSession else {
+                        return
+                    }
+
+                    self.latestRecognizedText = transcriptText
                 }
             },
             onFinalTranscriptReady: { [weak self] transcriptText in
                 Task { @MainActor in
                     guard let self else { return }
+                    guard self.activeTranscriptionSessionIdentifier == transcriptionSessionIdentifier,
+                          !self.hasFinishedCurrentDictationSession else {
+                        clickyDebugLog("dictation ignored-stale-final-transcript \(clickyDebugSnippet(transcriptText))")
+                        return
+                    }
+
                     self.latestRecognizedText = transcriptText
 
                     if self.isFinalizingTranscript {
@@ -551,7 +567,13 @@ final class BuddyDictationManager: NSObject, ObservableObject {
             },
             onError: { [weak self] error in
                 Task { @MainActor in
-                    self?.handleRecognitionError(error)
+                    guard let self,
+                          self.activeTranscriptionSessionIdentifier == transcriptionSessionIdentifier,
+                          !self.hasFinishedCurrentDictationSession else {
+                        return
+                    }
+
+                    self.handleRecognitionError(error)
                 }
             }
         )
@@ -594,6 +616,7 @@ final class BuddyDictationManager: NSObject, ObservableObject {
     private func finishCurrentDictationSessionIfNeeded(shouldSubmitFinalDraft: Bool) {
         guard !hasFinishedCurrentDictationSession else { return }
         hasFinishedCurrentDictationSession = true
+        activeTranscriptionSessionIdentifier = UUID()
 
         finalizeFallbackWorkItem?.cancel()
         finalizeFallbackWorkItem = nil
@@ -641,6 +664,7 @@ final class BuddyDictationManager: NSObject, ObservableObject {
 
     private func resetSessionState() {
         pendingStartRequestIdentifier = UUID()
+        activeTranscriptionSessionIdentifier = UUID()
         activeTranscriptionSession = nil
         draftCallbacks = nil
         activeStartSource = nil
