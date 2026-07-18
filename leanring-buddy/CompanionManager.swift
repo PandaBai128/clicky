@@ -51,6 +51,31 @@ enum CompanionVoiceState {
     case responding
 }
 
+enum CompanionResponseLength: String, CaseIterable {
+    case brief
+    case normal
+    case detailed
+
+    var displayName: String {
+        switch self {
+        case .brief: return "Brief"
+        case .normal: return "Normal"
+        case .detailed: return "Detailed"
+        }
+    }
+
+    var systemPromptInstruction: String {
+        switch self {
+        case .brief:
+            return "keep the answer to one or two concise sentences unless the user explicitly asks for more detail."
+        case .normal:
+            return "answer naturally with enough context to resolve the question, usually in two to four sentences. do not shorten an explanation so much that the user loses the reason or the next step."
+        case .detailed:
+            return "give a thorough explanation with the relevant reasoning and concrete guidance. use as many spoken sentences as needed, but stay focused on the current question and screen."
+        }
+    }
+}
+
 struct CompanionConversationExchange: Identifiable, Equatable {
     let id: UUID
     let userTranscript: String
@@ -151,6 +176,13 @@ final class CompanionManager: ObservableObject {
         }
         return storedModel ?? "MiniMax-M3"
     }()
+    @Published private(set) var responseLength: CompanionResponseLength = {
+        guard let storedValue = UserDefaults.standard.string(forKey: "clickyResponseLength"),
+              let storedResponseLength = CompanionResponseLength(rawValue: storedValue) else {
+            return .normal
+        }
+        return storedResponseLength
+    }()
 
     @Published var selectedTTSVoiceID: String = UserDefaults.standard.string(forKey: "selectedMiniMaxTTSVoiceID")
         ?? "Chinese (Mandarin)_Warm_Bestie"
@@ -176,6 +208,11 @@ final class CompanionManager: ObservableObject {
         selectedModel = model
         UserDefaults.standard.set(model, forKey: "selectedClaudeModel")
         claudeAPI.model = model
+    }
+
+    func setResponseLength(_ responseLength: CompanionResponseLength) {
+        self.responseLength = responseLength
+        UserDefaults.standard.set(responseLength.rawValue, forKey: "clickyResponseLength")
     }
 
     func setSelectedTTSVoiceID(_ voiceID: String) {
@@ -587,7 +624,8 @@ final class CompanionManager: ObservableObject {
 
     // MARK: - Companion Prompt
 
-    private static let companionVoiceResponseSystemPrompt = """
+    private var companionVoiceResponseSystemPrompt: String {
+        """
     you're clicky, a screen-aware voice companion that lives in the user's menu bar. the user just spoke to you via push-to-talk and you can see their screen(s). your job is to understand the current screen, answer the user's question, explain what they are seeing, and visually guide them when a visible target is relevant. your reply will be spoken aloud via text-to-speech, so write the way you'd actually talk. this is an ongoing conversation — you remember everything they've said before.
 
     language:
@@ -598,7 +636,8 @@ final class CompanionManager: ObservableObject {
     - never read a [POINT_V2:...] or legacy [POINT:...] tag aloud. keep it only as a machine-readable suffix.
 
     rules:
-    - default to one or two sentences. be direct and dense. if the user explicitly asks for more detail, explain enough to resolve the current question while staying focused on the current screen or topic.
+    - response length setting: \(responseLength.systemPromptInstruction)
+    - an explicit request in the user's current message for a shorter or more detailed answer overrides the response length setting.
     - if replying in english, use lowercase, casual, warm language. no emojis.
     - write for the ear, not the eye. short sentences. for normal answers, no lists, bullet points, markdown, or formatting — just natural speech.
     - do not proactively offer scripts, commands, automation, code, or ways to control the computer. those are outside your role.
@@ -607,6 +646,8 @@ final class CompanionManager: ObservableObject {
     - don't use abbreviations or symbols that sound weird read aloud. write "for example" not "e.g.", spell out small numbers.
     - if the user's question relates to what's on their screen, reference specific things you see.
     - if the screenshot doesn't seem relevant to their question, just answer the question directly.
+    - when the user asks to extract, transcribe, or copy text visible in the current screen or video frame, copy all legible requested text faithfully into a fenced plain-text block. preserve its reading order and meaningful line breaks. speak only a short completion sentence and never read the extracted block aloud.
+    - a screenshot represents only the current visible frame. never claim to have inspected earlier or later parts of a video.
     - never say "simply" or "just".
     - don't read out code verbatim. describe what the code does or what needs to change conversationally.
     - answer the current request completely, then stop. do not end by offering additional work, asking whether the user wants code, or suggesting unrelated next steps.
@@ -617,6 +658,7 @@ final class CompanionManager: ObservableObject {
     - without that requirement, never emit any point tag and never claim that you pointed, showed, guided, or indicated a screen location.
     - when pointing is requested but the exact target is not clearly visible, return [POINT_V2:none] rather than guessing.
     """
+    }
 
     private static func userPromptWithPointingContract(
         _ transcript: String,
@@ -672,6 +714,7 @@ final class CompanionManager: ObservableObject {
         elevenLabsTTSClient.stopPlayback()
 
         let shouldRequestPointing = PointingRequestPolicy.shouldRequestPointing(for: transcript)
+        let shouldExtractScreenText = ScreenTextExtractionPolicy.isTextExtractionRequest(transcript)
         let responseTaskIdentifier = UUID()
         currentResponseTaskIdentifier = responseTaskIdentifier
         currentResponseTask = Task {
@@ -681,7 +724,8 @@ final class CompanionManager: ObservableObject {
             do {
                 // Small controls need more source pixels for reliable pointing,
                 // while ordinary chat keeps the lighter screenshot payload.
-                let screenshotLongEdgeInPixels = shouldRequestPointing
+                let requiresDetailedScreenshot = shouldRequestPointing || shouldExtractScreenText
+                let screenshotLongEdgeInPixels = requiresDetailedScreenshot
                     ? Self.pointingScreenshotLongEdgeInPixels
                     : Self.standardScreenshotLongEdgeInPixels
                 let screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG(
@@ -728,13 +772,13 @@ final class CompanionManager: ObservableObject {
 
                 let (fullResponseText, _) = try await claudeAPI.analyzeImageStreaming(
                     images: labeledImages,
-                    systemPrompt: Self.companionVoiceResponseSystemPrompt,
+                    systemPrompt: companionVoiceResponseSystemPrompt,
                     conversationHistory: historyForAPI,
                     userPrompt: Self.userPromptWithPointingContract(
                         transcript,
                         shouldRequestPointing: shouldRequestPointing
                     ),
-                    temperature: shouldRequestPointing ? 0.1 : nil,
+                    temperature: requiresDetailedScreenshot ? 0.1 : nil,
                     onTextChunk: { accumulatedText in
                         guard self.currentResponseTaskIdentifier == responseTaskIdentifier,
                               !Task.isCancelled else { return }

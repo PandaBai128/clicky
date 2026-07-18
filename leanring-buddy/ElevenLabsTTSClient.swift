@@ -134,6 +134,7 @@ final class ElevenLabsTTSClient: NSObject, AVAudioPlayerDelegate {
             pitch: pitch,
             emotion: emotion
         ))
+        clickyDebugLog("tts segment-enqueued \(clickyDebugSnippet(normalizedText, limit: 100))")
         startStreamingSynthesisIfNeeded()
     }
 
@@ -189,6 +190,7 @@ final class ElevenLabsTTSClient: NSObject, AVAudioPlayerDelegate {
                 do {
                     let audioData = try await self.synthesizeAudio(speechRequest)
                     try Task.checkCancellation()
+                    clickyDebugLog("tts audio-ready bytes=\(audioData.count)")
                     self.pendingStreamingAudio.append(audioData)
                     try self.playNextStreamingAudioIfNeeded()
                 } catch is CancellationError {
@@ -224,6 +226,7 @@ final class ElevenLabsTTSClient: NSObject, AVAudioPlayerDelegate {
         player.volume = 1
         player.prepareToPlay()
         player.play()
+        clickyDebugLog("tts playback-start bytes=\(audioData.count)")
         print("🔊 MiniMax TTS: playing \(audioData.count / 1024)KB audio")
     }
 

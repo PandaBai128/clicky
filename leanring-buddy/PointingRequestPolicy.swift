@@ -77,3 +77,23 @@ enum PointingRequestPolicy {
         }
     }
 }
+
+enum ScreenTextExtractionPolicy {
+    nonisolated static func isTextExtractionRequest(_ transcript: String) -> Bool {
+        let normalizedTranscript = transcript
+            .lowercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedTranscript.isEmpty else { return false }
+
+        let extractionPhrases = [
+            "提取文字", "提取画面", "提取视频", "提取字幕",
+            "识别文字", "识别画面", "识别字幕",
+            "复制文字", "复制画面", "复制字幕",
+            "画面里的文字", "画面中的文字", "视频里的文字", "视频中的文字",
+            "extract text", "transcribe text", "copy the text", "copy text",
+            "text in this frame", "text on screen", "ocr"
+        ]
+
+        return extractionPhrases.contains { normalizedTranscript.contains($0) }
+    }
+}

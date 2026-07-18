@@ -198,4 +198,19 @@ struct leanring_buddyTests {
         #expect(finalSegments == ["内容已经写好，可以在面板里复制。"])
     }
 
+    @Test func responseLengthModesProvideDistinctPromptInstructions() async throws {
+        #expect(CompanionResponseLength.brief.systemPromptInstruction.contains("one or two"))
+        #expect(CompanionResponseLength.normal.systemPromptInstruction.contains("two to four"))
+        #expect(CompanionResponseLength.detailed.systemPromptInstruction.contains("thorough"))
+    }
+
+    @Test func currentVideoFrameTextExtractionRequestsDetailedScreenshot() async throws {
+        #expect(ScreenTextExtractionPolicy.isTextExtractionRequest(
+            "把当前视频画面里的文字提取出来"
+        ))
+        #expect(!ScreenTextExtractionPolicy.isTextExtractionRequest(
+            "这个页面是什么？"
+        ))
+    }
+
 }

@@ -32,6 +32,9 @@ struct CompanionPanelView: View {
                 modelPickerRow
                     .padding(.horizontal, 16)
 
+                responseLengthRow
+                    .padding(.horizontal, 16)
+
                 voiceSettingsSection
                     .padding(.horizontal, 16)
 
@@ -541,6 +544,51 @@ struct CompanionPanelView: View {
         .pointerCursor()
     }
 
+    private var responseLengthRow: some View {
+        HStack {
+            Text("Response")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundColor(DS.Colors.textSecondary)
+
+            Spacer()
+
+            HStack(spacing: 0) {
+                ForEach(CompanionResponseLength.allCases, id: \.self) { responseLength in
+                    responseLengthButton(responseLength)
+                }
+            }
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.white.opacity(0.06))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+            )
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func responseLengthButton(_ responseLength: CompanionResponseLength) -> some View {
+        let isSelected = companionManager.responseLength == responseLength
+        return Button(action: {
+            companionManager.setResponseLength(responseLength)
+        }) {
+            Text(responseLength.displayName)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(isSelected ? DS.Colors.textPrimary : DS.Colors.textTertiary)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(isSelected ? Color.white.opacity(0.1) : Color.clear)
+                )
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
+        .help("\(responseLength.displayName) responses")
+    }
+
     private var voiceSettingsSection: some View {
         HStack(spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
@@ -891,7 +939,7 @@ private struct ConversationCodeBlock: View {
                 Spacer()
 
                 ConversationCopyButton(
-                    title: "Copy code",
+                    title: copyButtonTitle,
                     systemImageName: "doc.on.doc",
                     textToCopy: code
                 )
@@ -915,6 +963,14 @@ private struct ConversationCodeBlock: View {
             RoundedRectangle(cornerRadius: DS.CornerRadius.small, style: .continuous)
                 .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
         )
+    }
+
+    private var copyButtonTitle: String {
+        let normalizedLanguage = language?.lowercased()
+        if normalizedLanguage == "text" || normalizedLanguage == "plaintext" || normalizedLanguage == "txt" {
+            return "Copy text"
+        }
+        return "Copy code"
     }
 }
 
