@@ -674,7 +674,7 @@ final class CompanionManager: ObservableObject {
             """
         }
 
-        """
+        return """
         \(transcript)
 
         internal clicky pointing requirement:
