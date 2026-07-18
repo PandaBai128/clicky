@@ -69,17 +69,81 @@ enum BuddyNavigationMode: Equatable {
     case pointingAtTarget
 }
 
+enum CompanionAutoHidePolicy {
+    static func shouldHide(
+        isEnabled: Bool,
+        secondsSinceLastMouseMovement: TimeInterval,
+        delaySeconds: TimeInterval,
+        isInteractionActive: Bool,
+        isFollowingCursor: Bool
+    ) -> Bool {
+        isEnabled
+            && !isInteractionActive
+            && isFollowingCursor
+            && secondsSinceLastMouseMovement >= delaySeconds
+    }
+}
+
+enum ZhuangzhuangExpressionTiming {
+    static let barkCycleDurationSeconds: TimeInterval = 1.45
+
+    static func blinkProgress(
+        elapsedTime: TimeInterval,
+        cycleDurationSeconds: TimeInterval
+    ) -> CGFloat {
+        let blinkDurationSeconds = 0.34
+        let timeWithinBlinkCycle = elapsedTime.truncatingRemainder(
+            dividingBy: cycleDurationSeconds
+        )
+        guard timeWithinBlinkCycle < blinkDurationSeconds else { return 0 }
+
+        let normalizedBlinkProgress = timeWithinBlinkCycle / blinkDurationSeconds
+        return CGFloat(sin(normalizedBlinkProgress * .pi))
+    }
+
+    static func barkProgress(elapsedTime: TimeInterval) -> CGFloat {
+        let timeWithinBarkCycle = elapsedTime.truncatingRemainder(
+            dividingBy: barkCycleDurationSeconds
+        )
+        let firstBarkProgress = singleBarkProgress(
+            timeWithinBarkCycle: timeWithinBarkCycle,
+            startTime: 0.08
+        )
+        let secondBarkProgress = singleBarkProgress(
+            timeWithinBarkCycle: timeWithinBarkCycle,
+            startTime: 0.46
+        )
+        return max(firstBarkProgress, secondBarkProgress)
+    }
+
+    private static func singleBarkProgress(
+        timeWithinBarkCycle: TimeInterval,
+        startTime: TimeInterval
+    ) -> CGFloat {
+        let barkDurationSeconds = 0.26
+        let elapsedBarkTime = timeWithinBarkCycle - startTime
+        guard elapsedBarkTime >= 0, elapsedBarkTime < barkDurationSeconds else { return 0 }
+
+        let normalizedBarkProgress = elapsedBarkTime / barkDurationSeconds
+        return CGFloat(sin(normalizedBarkProgress * .pi))
+    }
+}
+
 // SwiftUI view for the Zhuangzhuang cursor companion.
 // Each screen gets its own BlueCursorView. The view checks whether
 // the cursor is currently on THIS screen and only shows the buddy
 // avatar when it is. Voice and navigation states animate the same approved
-// identity image so facial proportions never drift between generated frames.
+// identity frames so facial proportions remain stable during expression changes.
 struct BlueCursorView: View {
     let screenFrame: CGRect
     @ObservedObject var companionManager: CompanionManager
 
     @State private var cursorPosition: CGPoint
     @State private var isCursorOnThisScreen: Bool
+    @State private var previousMouseLocation: CGPoint
+    @State private var lastMouseMovementDate: Date
+    @State private var isHiddenForMouseInactivity = false
+    @State private var configuredFollowResponse: CompanionFollowResponse
 
     init(screenFrame: CGRect, companionManager: CompanionManager) {
         self.screenFrame = screenFrame
@@ -90,9 +154,14 @@ struct BlueCursorView: View {
         let mouseLocation = NSEvent.mouseLocation
         let localX = mouseLocation.x - screenFrame.origin.x
         let localY = screenFrame.height - (mouseLocation.y - screenFrame.origin.y)
-        let cursorOffset = companionManager.companionAvatarSize.cursorOffset
+        let cursorOffset = companionManager.companionCursorDistance.cursorOffset(
+            for: companionManager.companionAvatarSize
+        )
         _cursorPosition = State(initialValue: CGPoint(x: localX + cursorOffset.x, y: localY + cursorOffset.y))
         _isCursorOnThisScreen = State(initialValue: screenFrame.contains(mouseLocation))
+        _previousMouseLocation = State(initialValue: mouseLocation)
+        _lastMouseMovementDate = State(initialValue: Date())
+        _configuredFollowResponse = State(initialValue: companionManager.companionFollowResponse)
     }
     @State private var timer: Timer?
     @State private var cursorOpacity: Double = 0.0
@@ -184,25 +253,21 @@ struct BlueCursorView: View {
                     }
             }
 
-            // The same approved portrait remains mounted for every state. SwiftUI
-            // supplies smooth motion, listening feedback, and thinking indicators
-            // without asking image generation to redraw the dog's face per frame.
+            // Expression frames were derived from the approved portrait and only
+            // change the eyes or mouth. The surrounding face remains visually fixed.
             ZhuangzhuangAvatarView(
                 diameter: companionManager.companionAvatarSize.diameter,
                 voiceState: companionManager.voiceState,
                 navigationMode: buddyNavigationMode,
                 audioPowerLevel: companionManager.currentAudioPowerLevel,
-                travelTiltDegrees: buddyTravelTiltDegrees
+                travelTiltDegrees: buddyTravelTiltDegrees,
+                glowColor: companionManager.companionGlowColor,
+                glowIntensity: companionManager.companionGlowIntensity,
+                isGlowEnabled: companionManager.isCompanionGlowEnabled
             )
                 .scaleEffect(buddyFlightScale)
                 .opacity(buddyIsVisibleOnThisScreen ? cursorOpacity : 0)
                 .position(cursorPosition)
-                .animation(
-                    buddyNavigationMode == .followingCursor
-                        ? .spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0)
-                        : nil,
-                    value: cursorPosition
-                )
                 .animation(.easeIn(duration: 0.25), value: companionManager.voiceState)
 
         }
@@ -214,7 +279,7 @@ struct BlueCursorView: View {
             isCursorOnThisScreen = screenFrame.contains(mouseLocation)
 
             let swiftUIPosition = convertScreenPointToSwiftUICoordinates(mouseLocation)
-            let cursorOffset = companionManager.companionAvatarSize.cursorOffset
+            let cursorOffset = currentCursorOffset
             self.cursorPosition = CGPoint(
                 x: swiftUIPosition.x + cursorOffset.x,
                 y: swiftUIPosition.y + cursorOffset.y
@@ -247,6 +312,15 @@ struct BlueCursorView: View {
 
             startNavigatingToElement(screenLocation: screenLocation)
         }
+        .onChange(of: companionManager.voiceState) { newVoiceState in
+            if newVoiceState != .idle {
+                lastMouseMovementDate = Date()
+                setMouseInactivityHidden(false)
+            }
+        }
+        .onChange(of: companionManager.companionFollowResponse) { newFollowResponse in
+            configuredFollowResponse = newFollowResponse
+        }
     }
 
     /// Whether the buddy avatar should be visible on this screen.
@@ -263,7 +337,7 @@ struct BlueCursorView: View {
             if companionManager.detectedElementScreenLocation != nil {
                 return false
             }
-            return isCursorOnThisScreen
+            return isCursorOnThisScreen && !isHiddenForMouseInactivity
         case .navigatingToTarget, .pointingAtTarget:
             return true
         }
@@ -272,9 +346,11 @@ struct BlueCursorView: View {
     // MARK: - Cursor Tracking
 
     private func startTrackingCursor() {
-        timer = Timer.scheduledTimer(withTimeInterval: 0.016, repeats: true) { _ in
+        let frameDurationSeconds = 1.0 / 60.0
+        timer = Timer.scheduledTimer(withTimeInterval: frameDurationSeconds, repeats: true) { _ in
             let mouseLocation = NSEvent.mouseLocation
             self.isCursorOnThisScreen = self.screenFrame.contains(mouseLocation)
+            self.updateMouseActivity(mouseLocation: mouseLocation, currentDate: Date())
 
             // During forward flight or pointing, the buddy is NOT interrupted by
             // mouse movement — it completes its full animation and return flight.
@@ -299,10 +375,54 @@ struct BlueCursorView: View {
 
             // Normal cursor following
             let swiftUIPosition = self.convertScreenPointToSwiftUICoordinates(mouseLocation)
-            let cursorOffset = companionManager.companionAvatarSize.cursorOffset
-            let buddyX = swiftUIPosition.x + cursorOffset.x
-            let buddyY = swiftUIPosition.y + cursorOffset.y
-            self.cursorPosition = CGPoint(x: buddyX, y: buddyY)
+            let cursorOffset = self.currentCursorOffset
+            let desiredCursorPosition = CGPoint(
+                x: swiftUIPosition.x + cursorOffset.x,
+                y: swiftUIPosition.y + cursorOffset.y
+            )
+            let smoothingFraction = self.configuredFollowResponse.smoothingFraction(
+                frameDurationSeconds: frameDurationSeconds
+            )
+            self.cursorPosition = CGPoint(
+                x: self.cursorPosition.x + (desiredCursorPosition.x - self.cursorPosition.x) * smoothingFraction,
+                y: self.cursorPosition.y + (desiredCursorPosition.y - self.cursorPosition.y) * smoothingFraction
+            )
+        }
+    }
+
+    private var currentCursorOffset: CGPoint {
+        companionManager.companionCursorDistance.cursorOffset(
+            for: companionManager.companionAvatarSize
+        )
+    }
+
+    private func updateMouseActivity(mouseLocation: CGPoint, currentDate: Date) {
+        let movementDistance = hypot(
+            mouseLocation.x - previousMouseLocation.x,
+            mouseLocation.y - previousMouseLocation.y
+        )
+
+        if movementDistance >= 0.5 {
+            previousMouseLocation = mouseLocation
+            lastMouseMovementDate = currentDate
+            setMouseInactivityHidden(false)
+            return
+        }
+
+        let shouldHideForInactivity = CompanionAutoHidePolicy.shouldHide(
+            isEnabled: companionManager.isCompanionAutoHideEnabled,
+            secondsSinceLastMouseMovement: currentDate.timeIntervalSince(lastMouseMovementDate),
+            delaySeconds: companionManager.companionAutoHideDelaySeconds,
+            isInteractionActive: companionManager.voiceState != .idle,
+            isFollowingCursor: buddyNavigationMode == .followingCursor
+        )
+        setMouseInactivityHidden(shouldHideForInactivity)
+    }
+
+    private func setMouseInactivityHidden(_ shouldHide: Bool) {
+        guard shouldHide != isHiddenForMouseInactivity else { return }
+        withAnimation(.easeInOut(duration: shouldHide ? 0.3 : 0.16)) {
+            isHiddenForMouseInactivity = shouldHide
         }
     }
 
@@ -318,6 +438,7 @@ struct BlueCursorView: View {
 
     /// Starts animating the buddy toward a detected UI element location.
     private func startNavigatingToElement(screenLocation: CGPoint) {
+        setMouseInactivityHidden(false)
         // Convert the AppKit screen location to SwiftUI coordinates for this screen
         let targetInSwiftUI = convertScreenPointToSwiftUICoordinates(screenLocation)
 
@@ -495,7 +616,7 @@ struct BlueCursorView: View {
     private func startFlyingBackToCursor() {
         let mouseLocation = NSEvent.mouseLocation
         let cursorInSwiftUI = convertScreenPointToSwiftUICoordinates(mouseLocation)
-        let cursorOffset = companionManager.companionAvatarSize.cursorOffset
+        let cursorOffset = currentCursorOffset
         let cursorWithTrackingOffset = CGPoint(
             x: cursorInSwiftUI.x + cursorOffset.x,
             y: cursorInSwiftUI.y + cursorOffset.y
@@ -536,71 +657,92 @@ struct BlueCursorView: View {
         navigationBubbleOpacity = 0.0
         navigationBubbleScale = 1.0
         companionManager.clearDetectedElementLocation()
+        lastMouseMovementDate = Date()
     }
 
 }
 
 // MARK: - Zhuangzhuang Avatar
 
-private struct ZhuangzhuangAvatarView: View {
+struct ZhuangzhuangAvatarView: View {
     let diameter: CGFloat
     let voiceState: CompanionVoiceState
     let navigationMode: BuddyNavigationMode
     let audioPowerLevel: CGFloat
     let travelTiltDegrees: Double
+    let glowColor: Color
+    let glowIntensity: Double
+    let isGlowEnabled: Bool
+    var blinkCycleDurationSeconds: Double = 5.8
+    @State private var expressionStateStartTime = Date().timeIntervalSinceReferenceDate
 
     var body: some View {
         TimelineView(.animation(minimumInterval: 1.0 / 60.0)) { timelineContext in
             let animationTime = timelineContext.date.timeIntervalSinceReferenceDate
             let portraitRotation = rotationDegrees(at: animationTime)
             let portraitScale = scale(at: animationTime)
-            let shouldBlink = isBlinking(at: animationTime)
+            let portraitOffset = offset(at: animationTime)
+            let blinkProgress = blinkProgress(at: animationTime)
+            let barkProgress = barkProgress(at: animationTime)
 
             ZStack {
-                Circle()
-                    .fill(Color(red: 0.79, green: 0.79, blue: 0.79))
-
                 Image("ZhuangzhuangHead")
                     .resizable()
-                    .scaledToFill()
+                    .scaledToFit()
                     .frame(width: diameter, height: diameter)
-                    .clipShape(Circle())
 
-                Circle()
-                    .stroke(DS.Colors.overlayCursorBlue.opacity(0.78), lineWidth: max(1, diameter * 0.045))
+                if blinkProgress > 0 {
+                    Image("ZhuangzhuangHeadClosedEyes")
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: diameter, height: diameter)
+                        .opacity(blinkProgress)
+                }
 
-                if shouldBlink {
-                    HStack(spacing: diameter * 0.07) {
-                        ForEach(0..<2, id: \.self) { _ in
-                            Capsule()
-                                .fill(Color(red: 0.42, green: 0.20, blue: 0.08))
-                                .frame(width: diameter * 0.16, height: max(1, diameter * 0.04))
-                        }
-                    }
-                    .offset(y: -diameter * 0.045)
+                if barkProgress > 0 {
+                    Image("ZhuangzhuangHeadBark")
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: diameter, height: diameter)
+                        .opacity(barkProgress)
                 }
 
                 if voiceState == .listening {
-                    BlueCursorWaveformView(audioPowerLevel: audioPowerLevel)
+                    BlueCursorWaveformView(
+                        audioPowerLevel: audioPowerLevel,
+                        accentColor: glowColor
+                    )
                         .offset(x: diameter * 0.72, y: diameter * 0.08)
                 }
 
                 if voiceState == .processing {
                     ZhuangzhuangThinkingDotsView(
                         diameter: diameter,
-                        animationTime: animationTime
+                        animationTime: animationTime,
+                        accentColor: glowColor
                     )
                 }
+
             }
             .frame(width: diameter, height: diameter)
             .rotationEffect(.degrees(portraitRotation))
             .scaleEffect(portraitScale)
+            .offset(portraitOffset)
             .shadow(
-                color: DS.Colors.overlayCursorBlue.opacity(navigationMode == .navigatingToTarget ? 0.72 : 0.42),
-                radius: navigationMode == .navigatingToTarget ? diameter * 0.34 : diameter * 0.20,
+                color: glowColor.opacity(glowOpacity),
+                radius: navigationMode == .navigatingToTarget ? diameter * 0.36 : diameter * 0.22,
                 x: 0,
                 y: 0
             )
+        }
+        .onChange(of: navigationMode) { _, _ in
+            expressionStateStartTime = Date().timeIntervalSinceReferenceDate
+        }
+        .onChange(of: voiceState) { _, _ in
+            expressionStateStartTime = Date().timeIntervalSinceReferenceDate
+        }
+        .onChange(of: blinkCycleDurationSeconds) { _, _ in
+            expressionStateStartTime = Date().timeIntervalSinceReferenceDate
         }
     }
 
@@ -609,50 +751,78 @@ private struct ZhuangzhuangAvatarView: View {
         case .navigatingToTarget:
             return travelTiltDegrees
         case .pointingAtTarget:
-            return -5 + sin(animationTime * 2.8) * 1.2
+            return -5 + sin(animationTime * 3.2) * 2.2
         case .followingCursor:
             break
         }
 
         switch voiceState {
         case .idle:
-            return sin(animationTime * 1.2) * 1.2
+            return sin(animationTime * 1.05) * 2.4
         case .listening:
-            return -7 + sin(animationTime * 2.2) * 1.4
+            return -12 + sin(animationTime * 2.1) * 2.6
         case .processing:
-            return 4 + sin(animationTime * 1.9) * 2.0
+            return 15 + sin(animationTime * 1.7) * 3.0
         case .responding:
-            return sin(animationTime * 1.8) * 0.9
+            return sin(animationTime * 1.6) * 1.8
         }
     }
 
     private func scale(at animationTime: TimeInterval) -> CGFloat {
+        if navigationMode == .pointingAtTarget {
+            return 1 + barkProgress(at: animationTime) * 0.035
+        }
         if voiceState == .listening {
             let normalizedAudioPower = min(max(audioPowerLevel * 1.7, 0), 1)
-            return 1 + normalizedAudioPower * 0.045
+            return 1 + normalizedAudioPower * 0.055
         }
-        return 1 + CGFloat(sin(animationTime * 1.7)) * 0.012
+        return 1 + CGFloat(sin(animationTime * 1.45)) * 0.022
     }
 
-    private func isBlinking(at animationTime: TimeInterval) -> Bool {
+    private func offset(at animationTime: TimeInterval) -> CGSize {
+        let horizontalMovement = CGFloat(sin(animationTime * 0.9)) * diameter * 0.035
+        let verticalMovement = CGFloat(sin(animationTime * 1.25 + 0.8)) * diameter * 0.055
+        return CGSize(width: horizontalMovement, height: verticalMovement)
+    }
+
+    private var glowOpacity: Double {
+        guard isGlowEnabled else { return 0 }
+        let navigationMultiplier = navigationMode == .navigatingToTarget ? 1.0 : 0.72
+        return min(glowIntensity * navigationMultiplier, 1)
+    }
+
+    private func blinkProgress(at animationTime: TimeInterval) -> CGFloat {
         guard navigationMode == .followingCursor,
               voiceState == .idle || voiceState == .responding else {
-            return false
+            return 0
         }
-        return animationTime.truncatingRemainder(dividingBy: 5.8) < 0.14
+
+        return ZhuangzhuangExpressionTiming.blinkProgress(
+            elapsedTime: max(0, animationTime - expressionStateStartTime),
+            cycleDurationSeconds: blinkCycleDurationSeconds
+        )
+    }
+
+    private func barkProgress(at animationTime: TimeInterval) -> CGFloat {
+        guard navigationMode == .pointingAtTarget else { return 0 }
+
+        return ZhuangzhuangExpressionTiming.barkProgress(
+            elapsedTime: max(0, animationTime - expressionStateStartTime)
+        )
     }
 }
 
 private struct ZhuangzhuangThinkingDotsView: View {
     let diameter: CGFloat
     let animationTime: TimeInterval
+    let accentColor: Color
 
     var body: some View {
         HStack(alignment: .bottom, spacing: max(1, diameter * 0.045)) {
             ForEach(0..<3, id: \.self) { dotIndex in
                 let wave = CGFloat((sin(animationTime * 4.2 + Double(dotIndex) * 0.9) + 1) / 2)
                 Circle()
-                    .fill(DS.Colors.overlayCursorBlue)
+                    .fill(accentColor)
                     .frame(
                         width: diameter * (0.10 + wave * 0.025),
                         height: diameter * (0.10 + wave * 0.025)
@@ -661,7 +831,7 @@ private struct ZhuangzhuangThinkingDotsView: View {
             }
         }
         .offset(x: diameter * 0.48, y: -diameter * 0.53)
-        .shadow(color: DS.Colors.overlayCursorBlue.opacity(0.65), radius: diameter * 0.12)
+        .shadow(color: accentColor.opacity(0.65), radius: diameter * 0.12)
     }
 }
 
@@ -689,6 +859,7 @@ private struct ZhuangzhuangTargetMarkerView: View {
 /// A small waveform that reacts beside Zhuangzhuang while the user speaks.
 private struct BlueCursorWaveformView: View {
     let audioPowerLevel: CGFloat
+    let accentColor: Color
 
     private let barCount = 5
     private let listeningBarProfile: [CGFloat] = [0.4, 0.7, 1.0, 0.7, 0.4]
@@ -698,7 +869,7 @@ private struct BlueCursorWaveformView: View {
             HStack(alignment: .center, spacing: 2) {
                 ForEach(0..<barCount, id: \.self) { barIndex in
                     RoundedRectangle(cornerRadius: 1.5, style: .continuous)
-                        .fill(DS.Colors.overlayCursorBlue)
+                        .fill(accentColor)
                         .frame(
                             width: 2,
                             height: barHeight(
@@ -708,7 +879,7 @@ private struct BlueCursorWaveformView: View {
                         )
                 }
             }
-            .shadow(color: DS.Colors.overlayCursorBlue.opacity(0.6), radius: 6, x: 0, y: 0)
+            .shadow(color: accentColor.opacity(0.6), radius: 6, x: 0, y: 0)
             .animation(.linear(duration: 0.08), value: audioPowerLevel)
         }
     }

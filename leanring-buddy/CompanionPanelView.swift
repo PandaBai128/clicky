@@ -25,6 +25,9 @@ struct CompanionPanelView: View {
                 .padding(.top, 16)
                 .padding(.horizontal, 16)
 
+            companionAppearanceSection
+                .padding(.horizontal, 16)
+
             if companionManager.allPermissionsGranted {
                 Spacer()
                     .frame(height: 12)
@@ -36,9 +39,6 @@ struct CompanionPanelView: View {
                     .padding(.horizontal, 16)
 
                 voiceSettingsSection
-                    .padding(.horizontal, 16)
-
-                companionAppearanceSection
                     .padding(.horizontal, 16)
 
                 Spacer()
@@ -89,13 +89,8 @@ struct CompanionPanelView: View {
             HStack(spacing: 8) {
                 Image("ZhuangzhuangHead")
                     .resizable()
-                    .scaledToFill()
-                    .frame(width: 22, height: 22)
-                    .clipShape(Circle())
-                    .overlay(
-                        Circle()
-                            .stroke(DS.Colors.borderSubtle, lineWidth: 0.75)
-                    )
+                    .scaledToFit()
+                    .frame(width: 24, height: 24)
                     .overlay(alignment: .bottomTrailing) {
                         Circle()
                             .fill(statusDotColor)
@@ -488,31 +483,43 @@ struct CompanionPanelView: View {
                 .labelsHidden()
                 .tint(DS.Colors.accent)
                 .scaleEffect(0.8)
-                .pointerCursor()
+                .disabled(!companionManager.allPermissionsGranted)
+                .opacity(companionManager.allPermissionsGranted ? 1 : 0.45)
+                .pointerCursor(isEnabled: companionManager.allPermissionsGranted)
             }
 
-            HStack {
-                Text("Size")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(DS.Colors.textTertiary)
+            HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Appearance")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(DS.Colors.textSecondary)
+
+                    Text("\(companionManager.companionAvatarSize.displayName) · \(companionManager.companionCursorDistance.displayName)")
+                        .font(.system(size: 10, weight: .medium, design: .rounded))
+                        .foregroundColor(DS.Colors.textTertiary)
+                }
 
                 Spacer()
 
-                Picker("Size", selection: Binding(
-                    get: { companionManager.companionAvatarSize },
-                    set: { companionManager.setCompanionAvatarSize($0) }
-                )) {
-                    ForEach(CompanionAvatarSize.allCases, id: \.self) { companionAvatarSize in
-                        Text(companionAvatarSize.displayName)
-                            .tag(companionAvatarSize)
-                    }
+                Button(action: {
+                    NotificationCenter.default.post(name: .clickyShowAppearanceSettings, object: nil)
+                }) {
+                    Image(systemName: "paintpalette.fill")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(DS.Colors.textSecondary)
+                        .frame(width: 30, height: 28)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(Color.white.opacity(0.06))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+                        )
                 }
-                .labelsHidden()
-                .pickerStyle(.segmented)
-                .frame(width: 158)
-                .disabled(!companionManager.isClickyCursorEnabled)
-                .opacity(companionManager.isClickyCursorEnabled ? 1 : 0.45)
+                .buttonStyle(.plain)
                 .pointerCursor()
+                .help("Appearance settings")
             }
         }
         .padding(.vertical, 4)

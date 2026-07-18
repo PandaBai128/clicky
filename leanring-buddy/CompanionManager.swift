@@ -96,9 +96,57 @@ enum CompanionAvatarSize: String, CaseIterable {
         }
     }
 
-    var cursorOffset: CGPoint {
-        let distance = diameter * 0.78
-        return CGPoint(x: distance, y: distance * 0.72)
+}
+
+enum CompanionCursorDistance: String, CaseIterable {
+    case near
+    case medium
+    case far
+
+    var displayName: String {
+        switch self {
+        case .near: return "Near"
+        case .medium: return "Medium"
+        case .far: return "Far"
+        }
+    }
+
+    func cursorOffset(for companionAvatarSize: CompanionAvatarSize) -> CGPoint {
+        let avatarRadius = companionAvatarSize.diameter / 2
+        switch self {
+        case .near:
+            return CGPoint(x: avatarRadius + 10, y: avatarRadius + 6)
+        case .medium:
+            return CGPoint(x: avatarRadius + 20, y: avatarRadius + 10)
+        case .far:
+            return CGPoint(x: avatarRadius + 34, y: avatarRadius + 20)
+        }
+    }
+}
+
+enum CompanionFollowResponse: String, CaseIterable {
+    case quick
+    case natural
+    case relaxed
+
+    var displayName: String {
+        switch self {
+        case .quick: return "Quick"
+        case .natural: return "Natural"
+        case .relaxed: return "Relaxed"
+        }
+    }
+
+    private var responseTimeSeconds: Double {
+        switch self {
+        case .quick: return 0.12
+        case .natural: return 0.22
+        case .relaxed: return 0.35
+        }
+    }
+
+    func smoothingFraction(frameDurationSeconds: Double) -> CGFloat {
+        CGFloat(1 - exp(-frameDurationSeconds / responseTimeSeconds))
     }
 }
 
@@ -123,6 +171,8 @@ struct CompanionConversationExchange: Identifiable, Equatable {
 
 @MainActor
 final class CompanionManager: ObservableObject {
+    static let defaultCompanionAutoHideDelaySeconds: Double = 10
+
     @Published private(set) var voiceState: CompanionVoiceState = .idle
     @Published private(set) var lastTranscript: String?
     @Published private(set) var visibleConversationHistory: [CompanionConversationExchange] = []
@@ -212,6 +262,42 @@ final class CompanionManager: ObservableObject {
         }
         return storedSize
     }()
+    @Published private(set) var companionCursorDistance: CompanionCursorDistance = {
+        guard let storedValue = UserDefaults.standard.string(forKey: "zhuangzhuangCursorDistance"),
+              let storedDistance = CompanionCursorDistance(rawValue: storedValue) else {
+            return .medium
+        }
+        return storedDistance
+    }()
+    @Published private(set) var companionFollowResponse: CompanionFollowResponse = {
+        guard let storedValue = UserDefaults.standard.string(forKey: "zhuangzhuangFollowResponse"),
+              let storedResponse = CompanionFollowResponse(rawValue: storedValue) else {
+            return .natural
+        }
+        return storedResponse
+    }()
+    @Published private(set) var isCompanionGlowEnabled: Bool = UserDefaults.standard.object(forKey: "zhuangzhuangGlowEnabled") == nil
+        ? true
+        : UserDefaults.standard.bool(forKey: "zhuangzhuangGlowEnabled")
+    @Published private(set) var companionGlowColorHex: String = UserDefaults.standard.string(forKey: "zhuangzhuangGlowColorHex")
+        ?? "#3380FF"
+    @Published private(set) var companionGlowIntensity: Double = {
+        guard UserDefaults.standard.object(forKey: "zhuangzhuangGlowIntensity") != nil else { return 0.45 }
+        return min(max(UserDefaults.standard.double(forKey: "zhuangzhuangGlowIntensity"), 0.1), 1)
+    }()
+    @Published private(set) var isCompanionAutoHideEnabled: Bool = UserDefaults.standard.object(forKey: "zhuangzhuangAutoHideEnabled") == nil
+        ? true
+        : UserDefaults.standard.bool(forKey: "zhuangzhuangAutoHideEnabled")
+    @Published private(set) var companionAutoHideDelaySeconds: Double = {
+        guard UserDefaults.standard.object(forKey: "zhuangzhuangAutoHideDelaySeconds") != nil else {
+            return CompanionManager.defaultCompanionAutoHideDelaySeconds
+        }
+        return min(max(UserDefaults.standard.double(forKey: "zhuangzhuangAutoHideDelaySeconds"), 2), 30)
+    }()
+
+    var companionGlowColor: Color {
+        Color(hex: companionGlowColorHex)
+    }
 
     @Published var selectedTTSVoiceID: String = UserDefaults.standard.string(forKey: "selectedMiniMaxTTSVoiceID")
         ?? "Chinese (Mandarin)_Warm_Bestie"
@@ -250,6 +336,48 @@ final class CompanionManager: ObservableObject {
     func setCompanionAvatarSize(_ companionAvatarSize: CompanionAvatarSize) {
         self.companionAvatarSize = companionAvatarSize
         UserDefaults.standard.set(companionAvatarSize.rawValue, forKey: "zhuangzhuangAvatarSize")
+    }
+
+    func setCompanionCursorDistance(_ companionCursorDistance: CompanionCursorDistance) {
+        self.companionCursorDistance = companionCursorDistance
+        UserDefaults.standard.set(companionCursorDistance.rawValue, forKey: "zhuangzhuangCursorDistance")
+    }
+
+    func setCompanionFollowResponse(_ companionFollowResponse: CompanionFollowResponse) {
+        self.companionFollowResponse = companionFollowResponse
+        UserDefaults.standard.set(companionFollowResponse.rawValue, forKey: "zhuangzhuangFollowResponse")
+    }
+
+    func setCompanionGlowEnabled(_ enabled: Bool) {
+        isCompanionGlowEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "zhuangzhuangGlowEnabled")
+    }
+
+    func setCompanionGlowColor(_ color: Color) {
+        guard let sRGBColor = NSColor(color).usingColorSpace(.sRGB) else { return }
+        let red = Int(round(sRGBColor.redComponent * 255))
+        let green = Int(round(sRGBColor.greenComponent * 255))
+        let blue = Int(round(sRGBColor.blueComponent * 255))
+        let colorHex = String(format: "#%02X%02X%02X", red, green, blue)
+        companionGlowColorHex = colorHex
+        UserDefaults.standard.set(colorHex, forKey: "zhuangzhuangGlowColorHex")
+    }
+
+    func setCompanionGlowIntensity(_ intensity: Double) {
+        let normalizedIntensity = min(max(intensity, 0.1), 1)
+        companionGlowIntensity = normalizedIntensity
+        UserDefaults.standard.set(normalizedIntensity, forKey: "zhuangzhuangGlowIntensity")
+    }
+
+    func setCompanionAutoHideEnabled(_ enabled: Bool) {
+        isCompanionAutoHideEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "zhuangzhuangAutoHideEnabled")
+    }
+
+    func setCompanionAutoHideDelaySeconds(_ delaySeconds: Double) {
+        let normalizedDelaySeconds = min(max(delaySeconds.rounded(), 2), 30)
+        companionAutoHideDelaySeconds = normalizedDelaySeconds
+        UserDefaults.standard.set(normalizedDelaySeconds, forKey: "zhuangzhuangAutoHideDelaySeconds")
     }
 
     func setSelectedTTSVoiceID(_ voiceID: String) {

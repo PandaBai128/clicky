@@ -17,6 +17,7 @@ import SwiftUI
 extension Notification.Name {
     static let clickyDismissPanel = Notification.Name("clickyDismissPanel")
     static let clickyShowVoiceSettings = Notification.Name("clickyShowVoiceSettings")
+    static let clickyShowAppearanceSettings = Notification.Name("clickyShowAppearanceSettings")
 }
 
 /// Custom NSPanel subclass that can become the key window even with
@@ -32,15 +33,18 @@ final class MenuBarPanelManager: NSObject {
     private var clickOutsideMonitor: Any?
     private var dismissPanelObserver: NSObjectProtocol?
     private var showVoiceSettingsObserver: NSObjectProtocol?
+    private var showAppearanceSettingsObserver: NSObjectProtocol?
 
     private let companionManager: CompanionManager
     private let voiceSettingsWindowManager: VoiceSettingsWindowManager
+    private let appearanceSettingsWindowManager: AppearanceSettingsWindowManager
     private let panelWidth: CGFloat = 320
     private let panelHeight: CGFloat = 380
 
     init(companionManager: CompanionManager) {
         self.companionManager = companionManager
         self.voiceSettingsWindowManager = VoiceSettingsWindowManager(companionManager: companionManager)
+        self.appearanceSettingsWindowManager = AppearanceSettingsWindowManager(companionManager: companionManager)
         super.init()
         createStatusItem()
 
@@ -60,6 +64,17 @@ final class MenuBarPanelManager: NSObject {
             self?.hidePanel()
             self?.voiceSettingsWindowManager.showWindow()
         }
+
+        showAppearanceSettingsObserver = NotificationCenter.default.addObserver(
+            forName: .clickyShowAppearanceSettings,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.hidePanel()
+                self?.appearanceSettingsWindowManager.showWindow()
+            }
+        }
     }
 
     deinit {
@@ -70,6 +85,9 @@ final class MenuBarPanelManager: NSObject {
             NotificationCenter.default.removeObserver(observer)
         }
         if let observer = showVoiceSettingsObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        if let observer = showAppearanceSettingsObserver {
             NotificationCenter.default.removeObserver(observer)
         }
     }

@@ -257,4 +257,84 @@ struct leanring_buddyTests {
         ))
     }
 
+    @Test func mediumCursorDistanceMatchesOriginalPointerSpacing() async throws {
+        let cursorOffset = CompanionCursorDistance.medium.cursorOffset(for: .medium)
+
+        #expect(cursorOffset == CGPoint(x: 35, y: 25))
+    }
+
+    @Test func followResponseModesHaveIncreasingLag() async throws {
+        let frameDurationSeconds = 1.0 / 60.0
+        let quickFraction = CompanionFollowResponse.quick.smoothingFraction(
+            frameDurationSeconds: frameDurationSeconds
+        )
+        let naturalFraction = CompanionFollowResponse.natural.smoothingFraction(
+            frameDurationSeconds: frameDurationSeconds
+        )
+        let relaxedFraction = CompanionFollowResponse.relaxed.smoothingFraction(
+            frameDurationSeconds: frameDurationSeconds
+        )
+
+        #expect(quickFraction > naturalFraction)
+        #expect(naturalFraction > relaxedFraction)
+        #expect(relaxedFraction > 0)
+        #expect(quickFraction < 1)
+    }
+
+    @Test func companionAutoHideWaitsForIdleFollowTimeout() async throws {
+        #expect(CompanionManager.defaultCompanionAutoHideDelaySeconds == 10)
+        #expect(!CompanionAutoHidePolicy.shouldHide(
+            isEnabled: true,
+            secondsSinceLastMouseMovement: 9.9,
+            delaySeconds: 10,
+            isInteractionActive: false,
+            isFollowingCursor: true
+        ))
+        #expect(CompanionAutoHidePolicy.shouldHide(
+            isEnabled: true,
+            secondsSinceLastMouseMovement: 10,
+            delaySeconds: 10,
+            isInteractionActive: false,
+            isFollowingCursor: true
+        ))
+        #expect(!CompanionAutoHidePolicy.shouldHide(
+            isEnabled: true,
+            secondsSinceLastMouseMovement: 20,
+            delaySeconds: 10,
+            isInteractionActive: true,
+            isFollowingCursor: true
+        ))
+        #expect(!CompanionAutoHidePolicy.shouldHide(
+            isEnabled: true,
+            secondsSinceLastMouseMovement: 20,
+            delaySeconds: 10,
+            isInteractionActive: false,
+            isFollowingCursor: false
+        ))
+    }
+
+    @Test func blinkTimingClosesThenReopensTheImageFrame() async throws {
+        let fullyClosedProgress = ZhuangzhuangExpressionTiming.blinkProgress(
+            elapsedTime: 0.17,
+            cycleDurationSeconds: 5.8
+        )
+        let reopenedProgress = ZhuangzhuangExpressionTiming.blinkProgress(
+            elapsedTime: 0.40,
+            cycleDurationSeconds: 5.8
+        )
+
+        #expect(fullyClosedProgress > 0.99)
+        #expect(reopenedProgress == 0)
+    }
+
+    @Test func barkTimingShowsTwoMouthOpeningsAndARestingBeat() async throws {
+        let firstBarkProgress = ZhuangzhuangExpressionTiming.barkProgress(elapsedTime: 0.21)
+        let secondBarkProgress = ZhuangzhuangExpressionTiming.barkProgress(elapsedTime: 0.59)
+        let restingProgress = ZhuangzhuangExpressionTiming.barkProgress(elapsedTime: 1.10)
+
+        #expect(firstBarkProgress > 0.99)
+        #expect(secondBarkProgress > 0.99)
+        #expect(restingProgress == 0)
+    }
+
 }
