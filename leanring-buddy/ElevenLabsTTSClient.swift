@@ -29,6 +29,15 @@ final class ElevenLabsTTSClient: NSObject, AVAudioPlayerDelegate {
         let emotion: String
     }
 
+    private struct StreamingTTSFailure: LocalizedError {
+        let underlyingError: Error
+        let receivedAudioBytes: Bool
+
+        var errorDescription: String? {
+            underlyingError.localizedDescription
+        }
+    }
+
     private struct VoiceCatalogResponse: Decodable {
         let systemVoice: [VoiceRecord]?
         let voiceCloning: [VoiceRecord]?
@@ -54,6 +63,7 @@ final class ElevenLabsTTSClient: NSObject, AVAudioPlayerDelegate {
     }
 
     private let ttsProxyURL: URL
+    private let streamingTTSProxyURL: URL
     private let voicesProxyURL: URL
     private let session: URLSession
 
@@ -61,8 +71,8 @@ final class ElevenLabsTTSClient: NSObject, AVAudioPlayerDelegate {
     /// audio finishes playing even if the caller doesn't hold a reference.
     private var audioPlayer: AVAudioPlayer?
     private var pendingStreamingSpeechRequests: [SpeechRequest] = []
-    private var pendingStreamingAudio: [Data] = []
     private var streamingSynthesisTask: Task<Void, Never>?
+    private var streamingAudioPlayer: StreamingMP3AudioPlayer?
     private var streamingGeneration = UUID()
     private var isAcceptingStreamingSpeech = false
     private var hasStartedStreamingPlayback = false
@@ -72,6 +82,7 @@ final class ElevenLabsTTSClient: NSObject, AVAudioPlayerDelegate {
     init(proxyURL: String) {
         let ttsProxyURL = URL(string: proxyURL)!
         self.ttsProxyURL = ttsProxyURL
+        self.streamingTTSProxyURL = ttsProxyURL.deletingLastPathComponent().appendingPathComponent("tts-stream")
         self.voicesProxyURL = ttsProxyURL.deletingLastPathComponent().appendingPathComponent("voices")
 
         let configuration = URLSessionConfiguration.default
@@ -113,6 +124,21 @@ final class ElevenLabsTTSClient: NSObject, AVAudioPlayerDelegate {
         hasStartedStreamingPlayback = false
         onStreamingPlaybackStarted = onPlaybackStarted
         onStreamingSpeechFailure = onFailure
+        streamingAudioPlayer = StreamingMP3AudioPlayer(
+            onPlaybackStarted: { [weak self] in
+                guard let self, !self.hasStartedStreamingPlayback else { return }
+                self.hasStartedStreamingPlayback = true
+                self.onStreamingPlaybackStarted?()
+            },
+            onPlaybackFinished: { [weak self] in
+                self?.streamingAudioPlayer = nil
+            },
+            onFailure: { [weak self] error in
+                guard let self else { return }
+                self.streamingAudioPlayer = nil
+                self.onStreamingSpeechFailure?(error)
+            }
+        )
     }
 
     func enqueueStreamingSpeech(
@@ -140,6 +166,7 @@ final class ElevenLabsTTSClient: NSObject, AVAudioPlayerDelegate {
 
     func finishStreamingResponse() {
         isAcceptingStreamingSpeech = false
+        finishStreamingPlaybackIfReady()
     }
 
     private func synthesizeAudio(_ speechRequest: SpeechRequest) async throws -> Data {
@@ -148,18 +175,7 @@ final class ElevenLabsTTSClient: NSObject, AVAudioPlayerDelegate {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("audio/mpeg", forHTTPHeaderField: "Accept")
 
-        var body: [String: Any] = [
-            "text": speechRequest.text,
-            "voice_id": speechRequest.voiceID,
-            "volume": min(max(speechRequest.volume, 0.1), 10),
-            "speed": min(max(speechRequest.speed, 0.5), 2),
-            "pitch": min(max(speechRequest.pitch, -12), 12)
-        ]
-        if speechRequest.emotion != "automatic" {
-            body["emotion"] = speechRequest.emotion
-        }
-
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        request.httpBody = try speechRequestBody(speechRequest)
 
         let (data, response) = try await session.data(for: request)
 
@@ -177,8 +193,22 @@ final class ElevenLabsTTSClient: NSObject, AVAudioPlayerDelegate {
         return data
     }
 
+    private func speechRequestBody(_ speechRequest: SpeechRequest) throws -> Data {
+        var body: [String: Any] = [
+            "text": speechRequest.text,
+            "voice_id": speechRequest.voiceID,
+            "volume": min(max(speechRequest.volume, 0.1), 10),
+            "speed": min(max(speechRequest.speed, 0.5), 2),
+            "pitch": min(max(speechRequest.pitch, -12), 12)
+        ]
+        if speechRequest.emotion != "automatic" {
+            body["emotion"] = speechRequest.emotion
+        }
+        return try JSONSerialization.data(withJSONObject: body)
+    }
+
     private func startStreamingSynthesisIfNeeded() {
-        guard streamingSynthesisTask == nil else { return }
+        guard streamingSynthesisTask == nil, let streamingAudioPlayer else { return }
         let synthesisGeneration = streamingGeneration
 
         streamingSynthesisTask = Task { [weak self] in
@@ -188,13 +218,21 @@ final class ElevenLabsTTSClient: NSObject, AVAudioPlayerDelegate {
                   !self.pendingStreamingSpeechRequests.isEmpty {
                 let speechRequest = self.pendingStreamingSpeechRequests.removeFirst()
                 do {
-                    let audioData = try await self.synthesizeAudio(speechRequest)
+                    try await self.streamAudio(speechRequest, into: streamingAudioPlayer)
                     try Task.checkCancellation()
-                    clickyDebugLog("tts audio-ready bytes=\(audioData.count)")
-                    self.pendingStreamingAudio.append(audioData)
-                    try self.playNextStreamingAudioIfNeeded()
                 } catch is CancellationError {
                     break
+                } catch let streamingFailure as StreamingTTSFailure
+                    where !streamingFailure.receivedAudioBytes {
+                    do {
+                        let completeAudioData = try await self.synthesizeAudio(speechRequest)
+                        try streamingAudioPlayer.beginSegment()
+                        try streamingAudioPlayer.appendAudioBytes(completeAudioData)
+                        streamingAudioPlayer.endSegment()
+                        clickyDebugLog("tts stream-fallback bytes=\(completeAudioData.count)")
+                    } catch {
+                        self.onStreamingSpeechFailure?(error)
+                    }
                 } catch {
                     self.onStreamingSpeechFailure?(error)
                 }
@@ -204,19 +242,78 @@ final class ElevenLabsTTSClient: NSObject, AVAudioPlayerDelegate {
             self.streamingSynthesisTask = nil
             if !self.pendingStreamingSpeechRequests.isEmpty {
                 self.startStreamingSynthesisIfNeeded()
+            } else {
+                self.finishStreamingPlaybackIfReady()
             }
         }
     }
 
-    private func playNextStreamingAudioIfNeeded() throws {
-        guard audioPlayer == nil, !pendingStreamingAudio.isEmpty else { return }
-        let audioData = pendingStreamingAudio.removeFirst()
-        try playAudioData(audioData)
+    private func streamAudio(
+        _ speechRequest: SpeechRequest,
+        into streamingAudioPlayer: StreamingMP3AudioPlayer
+    ) async throws {
+        var receivedAudioBytes = false
+        do {
+            var request = URLRequest(url: streamingTTSProxyURL)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("audio/mpeg", forHTTPHeaderField: "Accept")
+            request.httpBody = try speechRequestBody(speechRequest)
 
-        if !hasStartedStreamingPlayback {
-            hasStartedStreamingPlayback = true
-            onStreamingPlaybackStarted?()
+            let (audioBytes, response) = try await session.bytes(for: request)
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw NSError(domain: "MiniMaxTTS", code: -1,
+                              userInfo: [NSLocalizedDescriptionKey: "Invalid streaming response"])
+            }
+            guard (200...299).contains(httpResponse.statusCode) else {
+                throw NSError(domain: "MiniMaxTTS", code: httpResponse.statusCode,
+                              userInfo: [NSLocalizedDescriptionKey: "Streaming TTS API error (\(httpResponse.statusCode))"])
+            }
+
+            try streamingAudioPlayer.beginSegment()
+            var pendingAudioData = Data()
+            pendingAudioData.reserveCapacity(8_192)
+            var totalAudioByteCount = 0
+
+            for try await audioByte in audioBytes {
+                try Task.checkCancellation()
+                pendingAudioData.append(audioByte)
+                if pendingAudioData.count >= 8_192 {
+                    receivedAudioBytes = true
+                    totalAudioByteCount += pendingAudioData.count
+                    try streamingAudioPlayer.appendAudioBytes(pendingAudioData)
+                    pendingAudioData.removeAll(keepingCapacity: true)
+                }
+            }
+
+            if !pendingAudioData.isEmpty {
+                receivedAudioBytes = true
+                totalAudioByteCount += pendingAudioData.count
+                try streamingAudioPlayer.appendAudioBytes(pendingAudioData)
+            }
+            guard receivedAudioBytes else {
+                throw NSError(domain: "MiniMaxTTS", code: -2,
+                              userInfo: [NSLocalizedDescriptionKey: "MiniMax returned no streaming audio"])
+            }
+            streamingAudioPlayer.endSegment()
+            clickyDebugLog("tts stream-finished bytes=\(totalAudioByteCount)")
+        } catch is CancellationError {
+            streamingAudioPlayer.endSegment()
+            throw CancellationError()
+        } catch {
+            streamingAudioPlayer.endSegment()
+            throw StreamingTTSFailure(
+                underlyingError: error,
+                receivedAudioBytes: receivedAudioBytes
+            )
         }
+    }
+
+    private func finishStreamingPlaybackIfReady() {
+        guard !isAcceptingStreamingSpeech,
+              streamingSynthesisTask == nil,
+              pendingStreamingSpeechRequests.isEmpty else { return }
+        streamingAudioPlayer?.finishPlayback()
     }
 
     private func playAudioData(_ audioData: Data) throws {
@@ -271,9 +368,9 @@ final class ElevenLabsTTSClient: NSObject, AVAudioPlayerDelegate {
     /// Whether TTS audio is currently playing back.
     var isPlaying: Bool {
         (audioPlayer?.isPlaying ?? false)
+            || streamingAudioPlayer != nil
             || streamingSynthesisTask != nil
             || !pendingStreamingSpeechRequests.isEmpty
-            || !pendingStreamingAudio.isEmpty
             || isAcceptingStreamingSpeech
     }
 
@@ -283,7 +380,8 @@ final class ElevenLabsTTSClient: NSObject, AVAudioPlayerDelegate {
         streamingSynthesisTask?.cancel()
         streamingSynthesisTask = nil
         pendingStreamingSpeechRequests.removeAll()
-        pendingStreamingAudio.removeAll()
+        streamingAudioPlayer?.cancel()
+        streamingAudioPlayer = nil
         isAcceptingStreamingSpeech = false
         hasStartedStreamingPlayback = false
         onStreamingPlaybackStarted = nil
@@ -297,11 +395,6 @@ final class ElevenLabsTTSClient: NSObject, AVAudioPlayerDelegate {
         Task { @MainActor [weak self] in
             guard let self, self.audioPlayer === player else { return }
             self.audioPlayer = nil
-            do {
-                try self.playNextStreamingAudioIfNeeded()
-            } catch {
-                self.onStreamingSpeechFailure?(error)
-            }
         }
     }
 }

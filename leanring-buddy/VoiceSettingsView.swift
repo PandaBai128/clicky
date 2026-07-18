@@ -244,7 +244,7 @@ struct VoiceSettingsView: View {
                 Divider().background(DS.Colors.borderSubtle)
 
                 tuningSlider(
-                    title: "Volume",
+                    title: "Synthesis volume",
                     valueText: companionManager.ttsVolume.formatted(.number.precision(.fractionLength(1))),
                     value: Binding(
                         get: { companionManager.ttsVolume },
@@ -253,6 +253,12 @@ struct VoiceSettingsView: View {
                     range: 0.1...10,
                     step: 0.1
                 )
+
+                if companionManager.ttsVolume > 2 {
+                    Label("High synthesis levels may add noise or distortion.", systemImage: "waveform.badge.exclamationmark")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(DS.Colors.warning)
+                }
 
                 tuningSlider(
                     title: "Speed",
@@ -294,7 +300,7 @@ struct VoiceSettingsView: View {
                 }
 
                 Button("Reset adjustments") {
-                    companionManager.setTTSVolume(2.5)
+                    companionManager.setTTSVolume(1)
                     companionManager.setTTSSpeed(1)
                     companionManager.setTTSPitch(0)
                     companionManager.setTTSEmotion("automatic")

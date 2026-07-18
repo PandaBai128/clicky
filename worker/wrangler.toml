@@ -5,5 +5,5 @@ compatibility_date = "2024-01-01"
 [vars]
 MINIMAX_TTS_MODEL = "speech-2.8-turbo"
 MINIMAX_TTS_VOICE_ID = "Chinese (Mandarin)_Warm_Bestie"
-MINIMAX_TTS_VOLUME = "2.5"
+MINIMAX_TTS_VOLUME = "1.0"
 TENCENT_ASR_ENGINE_MODEL_TYPE = "16k_zh_en"

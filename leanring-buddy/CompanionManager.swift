@@ -187,7 +187,7 @@ final class CompanionManager: ObservableObject {
     @Published var selectedTTSVoiceID: String = UserDefaults.standard.string(forKey: "selectedMiniMaxTTSVoiceID")
         ?? "Chinese (Mandarin)_Warm_Bestie"
     @Published var ttsVolume: Double = {
-        guard UserDefaults.standard.object(forKey: "miniMaxTTSVolume") != nil else { return 2.5 }
+        guard UserDefaults.standard.object(forKey: "miniMaxTTSVolume") != nil else { return 1 }
         return min(max(UserDefaults.standard.double(forKey: "miniMaxTTSVolume"), 0.1), 10)
     }()
     @Published var ttsSpeed: Double = {

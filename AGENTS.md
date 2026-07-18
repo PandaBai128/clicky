@@ -16,7 +16,7 @@ All API keys live on a Cloudflare Worker proxy — nothing sensitive ships in th
 - **Pattern**: MVVM with `@StateObject` / `@Published` state management
 - **AI Chat**: MiniMax-M3 via Cloudflare Worker proxy with Anthropic-compatible SSE streaming
 - **Speech-to-Text**: Tencent Cloud ASR real-time streaming via signed websocket URL, with AssemblyAI, OpenAI, and Apple Speech still available as fallback implementations
-- **Text-to-Speech**: MiniMax T2A via Cloudflare Worker proxy. LLM text is segmented at sentence boundaries as it streams, synthesized in order, and played from a cancellable audio queue so speech can begin before the full response completes.
+- **Text-to-Speech**: MiniMax T2A via Cloudflare Worker proxy. LLM text is segmented at sentence boundaries as it streams; MiniMax audio frames are parsed incrementally and played through a cancellable Audio Queue before each MP3 finishes downloading.
 - **Screen Capture**: ScreenCaptureKit (macOS 14.2+), multi-monitor support
 - **Voice Input**: Push-to-talk via `AVAudioEngine` + pluggable transcription-provider layer. System-wide keyboard shortcut via listen-only CGEvent tap.
 - **Element Pointing**: The vision model embeds normalized `[POINT_V2:x,y:label:screenN]` tags using a fixed 0–1000 coordinate space. The overlay parses these, maps coordinates to the correct monitor, and animates the blue cursor along a bezier arc to the target. Legacy `[POINT:...]` tags are stripped but never move the cursor.
@@ -31,6 +31,7 @@ The app never calls external APIs directly. All requests go through a Cloudflare
 |-------|----------|---------|
 | `POST /chat` | `api.minimax.io/anthropic/v1/messages` | MiniMax-M3 vision + streaming chat |
 | `POST /tts` | `api.minimax.io/v1/t2a_v2` | MiniMax TTS audio |
+| `POST /tts-stream` | `api.minimax.io/v1/t2a_v2` | MiniMax streaming TTS converted from SSE hex frames to chunked MP3 |
 | `POST /voices` | `api.minimax.io/v1/get_voice` | List system and account-specific MiniMax voices |
 | `POST /transcribe-url` | Signed `asr.cloud.tencent.com` websocket URL | Fetches a short-lived Tencent Cloud ASR websocket URL |
 
@@ -73,14 +74,15 @@ Worker vars: `MINIMAX_TTS_MODEL`, `MINIMAX_TTS_VOICE_ID`, `MINIMAX_TTS_VOLUME`, 
 | `GlobalPushToTalkShortcutMonitor.swift` | ~132 | System-wide push-to-talk monitor. Owns the listen-only `CGEvent` tap and publishes press/release transitions. |
 | `ClaudeAPI.swift` | ~291 | MiniMax-compatible vision API client with streaming (SSE) and non-streaming modes. TLS warmup optimization, image MIME detection, conversation history support. |
 | `OpenAIAPI.swift` | ~142 | OpenAI GPT vision API client. |
-| `ElevenLabsTTSClient.swift` | ~300 | MiniMax TTS client. Fetches voice metadata, synthesizes streamed response sentences in order, and manages a cancellable `AVAudioPlayer` queue using persisted voice, volume, speed, pitch, and emotion settings. |
+| `ElevenLabsTTSClient.swift` | ~367 | MiniMax TTS client. Streams response speech through the Worker, retains complete-file voice previews, and coordinates ordered sentence playback. |
+| `StreamingMP3AudioPlayer.swift` | ~305 | Incremental MP3 parser and Audio Queue player used by response TTS. Reuses one output queue across sentence streams and supports immediate cancellation. |
 | `StreamingSpeechSegmenter.swift` | ~180 | Converts accumulated LLM text into complete speakable sentences, skips fenced code and point tags, and feeds ordered segments into the MiniMax TTS playback queue. |
 | `ElementLocationDetector.swift` | ~335 | Legacy Claude Computer Use coordinate helper. It is not part of the active MiniMax response pipeline. |
 | `DesignSystem.swift` | ~880 | Design system tokens — colors, corner radii, shared styles. All UI references `DS.Colors`, `DS.CornerRadius`, etc. |
 | `ClickyAnalytics.swift` | ~121 | PostHog analytics integration for usage tracking. |
 | `WindowPositionManager.swift` | ~262 | Window placement logic, Screen Recording permission flow, and accessibility permission helpers. |
 | `AppBundleConfiguration.swift` | ~28 | Runtime configuration reader for keys stored in the app bundle Info.plist. |
-| `worker/src/index.ts` | ~332 | Cloudflare Worker proxy. Routes: `/chat` (MiniMax), `/tts` (configurable MiniMax T2A), `/voices` (MiniMax voice catalog), `/transcribe-url` (Tencent ASR signed websocket URL). |
+| `worker/src/index.ts` | ~468 | Cloudflare Worker proxy. Routes include MiniMax chat, complete and streaming TTS, voice catalog, and Tencent ASR signed websocket URLs. |
 
 ## Build & Run
 

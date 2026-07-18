@@ -7,6 +7,7 @@
  * Routes:
  *   POST /chat           -> MiniMax Anthropic-compatible Messages API
  *   POST /tts            -> MiniMax T2A HTTP API, returned as audio/mpeg
+ *   POST /tts-stream     -> MiniMax streaming T2A, returned as chunked audio/mpeg
  *   POST /voices         -> MiniMax voice catalog for the configured account
  *   POST /transcribe-url -> Tencent Cloud realtime ASR signed websocket URL
  */
@@ -27,7 +28,7 @@ interface Env {
 }
 
 const TENCENT_ASR_HOST = "asr.cloud.tencent.com";
-const defaultMiniMaxTTSVolume = 2.5;
+const defaultMiniMaxTTSVolume = 1;
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -48,6 +49,10 @@ export default {
 
       if (url.pathname === "/tts") {
         return await handleTTS(request, env, minimaxTTSURL);
+      }
+
+      if (url.pathname === "/tts-stream") {
+        return await handleStreamingTTS(request, env, minimaxTTSURL);
       }
 
       if (url.pathname === "/voices") {
@@ -184,6 +189,135 @@ async function handleTTS(request: Request, env: Env, minimaxTTSURL: string): Pro
   return new Response(hexToUint8Array(payload.data.audio), {
     status: 200,
     headers: { "content-type": "audio/mpeg" },
+  });
+}
+
+async function handleStreamingTTS(
+  request: Request,
+  env: Env,
+  minimaxTTSURL: string,
+): Promise<Response> {
+  const incomingBody = await request.json<{
+    text?: string;
+    voice_id?: string;
+    volume?: number;
+    speed?: number;
+    pitch?: number;
+    emotion?: string;
+  }>();
+  const text = incomingBody.text?.trim();
+
+  if (!text) {
+    return jsonResponse({ error: "Missing text for TTS." }, 400);
+  }
+
+  const upstreamResponse = await fetch(minimaxTTSURL, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.MINIMAX_API_KEY}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model: env.MINIMAX_TTS_MODEL || "speech-2.8-turbo",
+      text,
+      stream: true,
+      language_boost: "auto",
+      output_format: "hex",
+      voice_setting: {
+        voice_id: incomingBody.voice_id?.trim()
+          || env.MINIMAX_TTS_VOICE_ID
+          || "Chinese (Mandarin)_Warm_Bestie",
+        speed: parseMiniMaxTTSSpeed(incomingBody.speed),
+        vol: parseMiniMaxTTSVolume(incomingBody.volume ?? env.MINIMAX_TTS_VOLUME),
+        pitch: parseMiniMaxTTSPitch(incomingBody.pitch),
+        ...(incomingBody.emotion ? { emotion: incomingBody.emotion } : {}),
+      },
+      audio_setting: {
+        sample_rate: 32000,
+        bitrate: 128000,
+        format: "mp3",
+        channel: 1,
+      },
+    }),
+  });
+
+  if (!upstreamResponse.ok || !upstreamResponse.body) {
+    const errorBody = await upstreamResponse.text();
+    console.error(`[/tts-stream] MiniMax TTS error ${upstreamResponse.status}: ${errorBody}`);
+    return new Response(errorBody, {
+      status: upstreamResponse.status,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
+  return new Response(miniMaxSSEAudioStream(upstreamResponse.body), {
+    status: 200,
+    headers: {
+      "content-type": "audio/mpeg",
+      "cache-control": "no-cache",
+    },
+  });
+}
+
+function miniMaxSSEAudioStream(upstreamBody: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+  const reader = upstreamBody.getReader();
+  return new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const decoder = new TextDecoder();
+      let pendingText = "";
+      let hasStreamedAudio = false;
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          pendingText += decoder.decode(value, { stream: !done });
+
+          const lines = pendingText.split("\n");
+          pendingText = done ? "" : lines.pop() || "";
+
+          for (const line of lines) {
+            const trimmedLine = line.trim();
+            if (!trimmedLine.startsWith("data:")) {
+              continue;
+            }
+
+            const payload = JSON.parse(trimmedLine.slice(5)) as {
+              data?: { audio?: string; status?: number };
+              base_resp?: { status_code?: number; status_msg?: string };
+            };
+            if (payload.base_resp?.status_code && payload.base_resp.status_code !== 0) {
+              throw new Error(payload.base_resp.status_msg || "MiniMax streaming TTS failed.");
+            }
+
+            const audioHex = payload.data?.audio?.trim();
+            if (!audioHex) {
+              continue;
+            }
+
+            // Status 2 repeats the complete file after the status-1 chunks. Only
+            // use it as a fallback when MiniMax returned no incremental audio.
+            if (payload.data?.status === 1) {
+              controller.enqueue(hexToUint8Array(audioHex));
+              hasStreamedAudio = true;
+            } else if (!hasStreamedAudio) {
+              controller.enqueue(hexToUint8Array(audioHex));
+            }
+          }
+
+          if (done) {
+            break;
+          }
+        }
+        controller.close();
+      } catch (error) {
+        controller.error(error);
+      } finally {
+        reader.releaseLock();
+      }
+    },
+    cancel() {
+      reader.cancel().catch(() => {});
+    },
   });
 }
 

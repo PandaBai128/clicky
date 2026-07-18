@@ -11,7 +11,7 @@ const minimaxAPIHost = (env.MINIMAX_API_HOST || "https://api.minimax.io").replac
 const MINIMAX_MESSAGES_URL = `${minimaxAPIHost}/anthropic/v1/messages`;
 const MINIMAX_TTS_URL = `${minimaxAPIHost}/v1/t2a_v2`;
 const MINIMAX_VOICES_URL = `${minimaxAPIHost}/v1/get_voice`;
-const defaultMiniMaxTTSVolume = 2.5;
+const defaultMiniMaxTTSVolume = 1;
 
 const server = createServer(async (request, response) => {
   try {
@@ -29,6 +29,11 @@ const server = createServer(async (request, response) => {
 
     if (url.pathname === "/tts") {
       await handleTTS(request, response);
+      return;
+    }
+
+    if (url.pathname === "/tts-stream") {
+      await handleStreamingTTS(request, response);
       return;
     }
 
@@ -163,6 +168,113 @@ async function handleTTS(request, response) {
   response.end(audioBuffer);
 }
 
+async function handleStreamingTTS(request, response) {
+  requireEnv(["MINIMAX_API_KEY"]);
+
+  const incomingBody = await readJSON(request);
+  const text = incomingBody.text?.trim();
+
+  if (!text) {
+    sendJSON(response, 400, { error: "Missing text for TTS." });
+    return;
+  }
+
+  const upstreamResponse = await fetch(MINIMAX_TTS_URL, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.MINIMAX_API_KEY}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model: env.MINIMAX_TTS_MODEL || "speech-2.8-turbo",
+      text,
+      stream: true,
+      language_boost: "auto",
+      output_format: "hex",
+      voice_setting: {
+        voice_id: incomingBody.voice_id?.trim() || env.MINIMAX_TTS_VOICE_ID || "Chinese (Mandarin)_Warm_Bestie",
+        speed: parseMiniMaxTTSSpeed(incomingBody.speed),
+        vol: parseMiniMaxTTSVolume(incomingBody.volume ?? env.MINIMAX_TTS_VOLUME),
+        pitch: parseMiniMaxTTSPitch(incomingBody.pitch),
+        ...(incomingBody.emotion ? { emotion: incomingBody.emotion } : {}),
+      },
+      audio_setting: {
+        sample_rate: 32000,
+        bitrate: 128000,
+        format: "mp3",
+        channel: 1,
+      },
+    }),
+  });
+
+  if (!upstreamResponse.ok || !upstreamResponse.body) {
+    const errorBody = await upstreamResponse.text();
+    console.error("[local proxy] MiniMax streaming TTS error:", errorBody);
+    sendText(response, upstreamResponse.status, errorBody, "application/json");
+    return;
+  }
+
+  response.writeHead(200, {
+    "content-type": "audio/mpeg",
+    "cache-control": "no-cache",
+  });
+
+  const decoder = new TextDecoder();
+  let pendingText = "";
+  let hasStreamedAudio = false;
+
+  try {
+    for await (const chunk of upstreamResponse.body) {
+      pendingText += decoder.decode(chunk, { stream: true });
+      const lines = pendingText.split("\n");
+      pendingText = lines.pop() || "";
+
+      for (const line of lines) {
+        const result = writeMiniMaxStreamingAudioLine(line, response, hasStreamedAudio);
+        hasStreamedAudio = result.hasStreamedAudio;
+      }
+    }
+
+    pendingText += decoder.decode();
+    if (pendingText.trim()) {
+      writeMiniMaxStreamingAudioLine(pendingText, response, hasStreamedAudio);
+    }
+    response.end();
+  } catch (error) {
+    console.error("[local proxy] MiniMax streaming TTS decode error:", error);
+    response.destroy(error);
+  }
+}
+
+function writeMiniMaxStreamingAudioLine(line, response, hasStreamedAudio) {
+  const trimmedLine = line.trim();
+  if (!trimmedLine.startsWith("data:")) {
+    return { hasStreamedAudio };
+  }
+
+  const payload = JSON.parse(trimmedLine.slice(5));
+  if (payload.base_resp?.status_code && payload.base_resp.status_code !== 0) {
+    throw new Error(payload.base_resp.status_msg || "MiniMax streaming TTS failed.");
+  }
+
+  const audioHex = payload.data?.audio?.trim();
+  if (!audioHex) {
+    return { hasStreamedAudio };
+  }
+
+  if (payload.data?.status === 1) {
+    response.write(Buffer.from(audioHex, "hex"));
+    return { hasStreamedAudio: true };
+  }
+
+  // Status 2 repeats the complete file after the status-1 chunks. Only use
+  // it as a fallback when MiniMax returned no incremental audio.
+  if (!hasStreamedAudio) {
+    response.write(Buffer.from(audioHex, "hex"));
+  }
+  return { hasStreamedAudio };
+}
+
 async function handleVoices(response) {
   requireEnv(["MINIMAX_API_KEY"]);
 
@@ -233,7 +345,7 @@ async function handleTranscribeURL(request, response) {
 }
 
 function loadEnvironment() {
-  const loadedEnv = { ...process.env };
+  const loadedEnv = {};
 
   for (const filename of [".dev.vars", ".env"]) {
     if (!existsSync(filename)) {
@@ -258,7 +370,7 @@ function loadEnvironment() {
     }
   }
 
-  return loadedEnv;
+  return { ...loadedEnv, ...process.env };
 }
 
 function requireEnv(requiredKeys) {
