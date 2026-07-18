@@ -27,25 +27,6 @@ enum PointingRequestPolicy {
             return true
         }
 
-        let nonVisualSubjectWords = [
-            "新闻", "知识", "代码", "脚本", "文案", "提示词",
-            "bug 的原因", "bug原因", "问题的原因", "错误的原因",
-            "news", "knowledge", "code", "script", "prompt",
-            "cause of the bug", "reason for the error"
-        ]
-        let describesNonVisualSubject = nonVisualSubjectWords.contains {
-            normalizedTranscript.contains($0)
-        }
-
-        let directLocationPhrases = [
-            "在哪儿", "在哪里", "在哪", "什么位置", "哪个位置",
-            "where is", "where's", "where are", "what position"
-        ]
-        if !describesNonVisualSubject,
-           directLocationPhrases.contains(where: { normalizedTranscript.contains($0) }) {
-            return true
-        }
-
         let currentScreenReferencePhrases = [
             "这个页面", "当前页面", "这个界面", "当前界面",
             "这个按钮", "这个图标", "这个菜单", "这个窗口",
@@ -53,17 +34,35 @@ enum PointingRequestPolicy {
             "this page", "current page", "this screen", "this button",
             "this icon", "this menu", "this window", "on screen", "on the desktop"
         ]
-        if !describesNonVisualSubject,
-           currentScreenReferencePhrases.contains(where: { normalizedTranscript.contains($0) }) {
+        if currentScreenReferencePhrases.contains(where: { normalizedTranscript.contains($0) }) {
             return true
         }
 
         let visibleTargetWords = [
             "按钮", "图标", "菜单", "文件", "文件夹", "桌面", "窗口",
             "应用", "软件", "浏览器", "输入框", "选项", "设置",
-            "button", "icon", "menu", "file", "folder", "desktop", "window",
-            "app", "application", "browser", "field", "tab", "toolbar", "settings"
+            "狗", "猫", "宠物", "人物", "头像", "图片", "照片", "标志"
         ]
+        let englishVisibleTargetWords: Set<String> = [
+            "button", "icon", "menu", "file", "folder", "desktop", "window",
+            "app", "application", "browser", "field", "tab", "toolbar", "settings",
+            "dog", "cat", "pet", "person", "avatar", "image", "photo", "logo"
+        ]
+        let englishWordsInTranscript = Set(normalizedTranscript.split {
+            !$0.isLetter && !$0.isNumber
+        }.map(String.init))
+        let describesVisibleTarget = visibleTargetWords.contains {
+            normalizedTranscript.contains($0)
+        } || !englishWordsInTranscript.isDisjoint(with: englishVisibleTargetWords)
+        let directLocationPhrases = [
+            "在哪儿", "在哪里", "在哪", "什么位置", "哪个位置",
+            "where is", "where's", "where are", "what position"
+        ]
+        if describesVisibleTarget,
+           directLocationPhrases.contains(where: { normalizedTranscript.contains($0) }) {
+            return true
+        }
+
         let visibleSearchOrLocationPhrases = [
             "帮我定位", "给我定位", "定位一下",
             "帮我找", "给我找", "找一下", "找出", "找找",
@@ -72,9 +71,7 @@ enum PointingRequestPolicy {
 
         return visibleSearchOrLocationPhrases.contains {
             normalizedTranscript.contains($0)
-        } && visibleTargetWords.contains {
-            normalizedTranscript.contains($0)
-        }
+        } && describesVisibleTarget
     }
 }
 

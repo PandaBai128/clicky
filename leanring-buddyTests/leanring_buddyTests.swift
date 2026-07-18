@@ -195,7 +195,32 @@ struct leanring_buddyTests {
         let finalSegments = segmenter.finish(finalAccumulatedText: response)
 
         #expect(firstSegments == ["已经整理好了。"])
-        #expect(finalSegments == ["内容已经写好，可以在面板里复制。"])
+        #expect(finalSegments.isEmpty)
+    }
+
+    @Test func streamingSpeechDoesNotInventChineseCopyNoticeForEnglishCode() async throws {
+        var segmenter = StreamingSpeechSegmenter()
+        let response = "Here is the result.```swift\nprint(\"hello\")\n```[POINT_V2:500,500:editor]"
+
+        let firstSegments = segmenter.consume(accumulatedText: response)
+        let finalSegments = segmenter.finish(finalAccumulatedText: response)
+        let allSegments = firstSegments + finalSegments
+
+        #expect(allSegments == ["Here is the result."])
+        #expect(!allSegments.joined().contains("内容已经写好"))
+        #expect(!allSegments.joined().contains("print"))
+        #expect(!allSegments.joined().contains("POINT_V2"))
+    }
+
+    @Test func abstractLocationQuestionsDoNotRequestPointing() async throws {
+        #expect(!PointingRequestPolicy.shouldRequestPointing(for: "幸福在哪里？"))
+        #expect(!PointingRequestPolicy.shouldRequestPointing(for: "问题出在哪里？"))
+        #expect(!PointingRequestPolicy.shouldRequestPointing(for: "Where is happiness?"))
+    }
+
+    @Test func geographicLocationQuestionsDoNotRequestPointing() async throws {
+        #expect(!PointingRequestPolicy.shouldRequestPointing(for: "中国在哪里？"))
+        #expect(!PointingRequestPolicy.shouldRequestPointing(for: "Where is China?"))
     }
 
     @Test func responseLengthModesProvideDistinctPromptInstructions() async throws {

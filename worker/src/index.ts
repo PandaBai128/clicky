@@ -1,3 +1,6 @@
+import { miniMaxSSEAudioStream } from "./minimax-sse-audio";
+import { miniMaxTTSModelSupportsEmotion } from "./minimax-tts-capabilities";
+
 /**
  * Clicky Proxy Worker
  *
@@ -127,6 +130,7 @@ async function handleTTS(request: Request, env: Env, minimaxTTSURL: string): Pro
   }>();
   const text = incomingBody.text?.trim();
   const requestedVoiceId = incomingBody.voice_id?.trim();
+  const ttsModel = env.MINIMAX_TTS_MODEL || "speech-2.8-turbo";
 
   if (!text) {
     return jsonResponse({ error: "Missing text for TTS." }, 400);
@@ -139,7 +143,7 @@ async function handleTTS(request: Request, env: Env, minimaxTTSURL: string): Pro
       "content-type": "application/json",
     },
     body: JSON.stringify({
-      model: env.MINIMAX_TTS_MODEL || "speech-2.8-turbo",
+      model: ttsModel,
       text,
       stream: false,
       language_boost: "auto",
@@ -149,7 +153,9 @@ async function handleTTS(request: Request, env: Env, minimaxTTSURL: string): Pro
         speed: parseMiniMaxTTSSpeed(incomingBody.speed),
         vol: parseMiniMaxTTSVolume(incomingBody.volume ?? env.MINIMAX_TTS_VOLUME),
         pitch: parseMiniMaxTTSPitch(incomingBody.pitch),
-        ...(incomingBody.emotion ? { emotion: incomingBody.emotion } : {}),
+        ...(incomingBody.emotion && miniMaxTTSModelSupportsEmotion(ttsModel)
+          ? { emotion: incomingBody.emotion }
+          : {}),
       },
       audio_setting: {
         sample_rate: 32000,
@@ -206,6 +212,7 @@ async function handleStreamingTTS(
     emotion?: string;
   }>();
   const text = incomingBody.text?.trim();
+  const ttsModel = env.MINIMAX_TTS_MODEL || "speech-2.8-turbo";
 
   if (!text) {
     return jsonResponse({ error: "Missing text for TTS." }, 400);
@@ -218,7 +225,7 @@ async function handleStreamingTTS(
       "content-type": "application/json",
     },
     body: JSON.stringify({
-      model: env.MINIMAX_TTS_MODEL || "speech-2.8-turbo",
+      model: ttsModel,
       text,
       stream: true,
       language_boost: "auto",
@@ -230,7 +237,9 @@ async function handleStreamingTTS(
         speed: parseMiniMaxTTSSpeed(incomingBody.speed),
         vol: parseMiniMaxTTSVolume(incomingBody.volume ?? env.MINIMAX_TTS_VOLUME),
         pitch: parseMiniMaxTTSPitch(incomingBody.pitch),
-        ...(incomingBody.emotion ? { emotion: incomingBody.emotion } : {}),
+        ...(incomingBody.emotion && miniMaxTTSModelSupportsEmotion(ttsModel)
+          ? { emotion: incomingBody.emotion }
+          : {}),
       },
       audio_setting: {
         sample_rate: 32000,
@@ -255,68 +264,6 @@ async function handleStreamingTTS(
     headers: {
       "content-type": "audio/mpeg",
       "cache-control": "no-cache",
-    },
-  });
-}
-
-function miniMaxSSEAudioStream(upstreamBody: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
-  const reader = upstreamBody.getReader();
-  return new ReadableStream<Uint8Array>({
-    async start(controller) {
-      const decoder = new TextDecoder();
-      let pendingText = "";
-      let hasStreamedAudio = false;
-
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          pendingText += decoder.decode(value, { stream: !done });
-
-          const lines = pendingText.split("\n");
-          pendingText = done ? "" : lines.pop() || "";
-
-          for (const line of lines) {
-            const trimmedLine = line.trim();
-            if (!trimmedLine.startsWith("data:")) {
-              continue;
-            }
-
-            const payload = JSON.parse(trimmedLine.slice(5)) as {
-              data?: { audio?: string; status?: number };
-              base_resp?: { status_code?: number; status_msg?: string };
-            };
-            if (payload.base_resp?.status_code && payload.base_resp.status_code !== 0) {
-              throw new Error(payload.base_resp.status_msg || "MiniMax streaming TTS failed.");
-            }
-
-            const audioHex = payload.data?.audio?.trim();
-            if (!audioHex) {
-              continue;
-            }
-
-            // Status 2 repeats the complete file after the status-1 chunks. Only
-            // use it as a fallback when MiniMax returned no incremental audio.
-            if (payload.data?.status === 1) {
-              controller.enqueue(hexToUint8Array(audioHex));
-              hasStreamedAudio = true;
-            } else if (!hasStreamedAudio) {
-              controller.enqueue(hexToUint8Array(audioHex));
-            }
-          }
-
-          if (done) {
-            break;
-          }
-        }
-        controller.close();
-      } catch (error) {
-        controller.error(error);
-      } finally {
-        reader.releaseLock();
-      }
-    },
-    cancel() {
-      reader.cancel().catch(() => {});
     },
   });
 }

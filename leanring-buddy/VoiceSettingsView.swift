@@ -21,17 +21,7 @@ struct VoiceSettingsView: View {
     @State private var searchText = ""
     @State private var sourceFilter: VoiceSourceFilter = .all
     @State private var previewText = "你好，我是 Clicky。这是我的声音效果。"
-
-    private let supportedEmotions: [(id: String, label: String)] = [
-        ("automatic", "Automatic"),
-        ("happy", "Happy"),
-        ("sad", "Sad"),
-        ("angry", "Angry"),
-        ("fearful", "Fearful"),
-        ("disgusted", "Disgusted"),
-        ("surprised", "Surprised"),
-        ("calm", "Calm")
-    ]
+    @State private var hoveredVoiceID: String?
 
     private var filteredVoices: [MiniMaxVoiceOption] {
         companionManager.availableTTSVoices
@@ -74,6 +64,9 @@ struct VoiceSettingsView: View {
                 companionManager.loadAvailableTTSVoices()
             }
         }
+        .onDisappear {
+            companionManager.cancelTTSVoicePreview()
+        }
     }
 
     private var header: some View {
@@ -101,8 +94,9 @@ struct VoiceSettingsView: View {
             }
             .buttonStyle(.plain)
             .foregroundColor(DS.Colors.textSecondary)
-            .pointerCursor()
+            .pointerCursor(isEnabled: !companionManager.isLoadingTTSVoices)
             .help("Reload voice library")
+            .disabled(companionManager.isLoadingTTSVoices)
         }
         .padding(.horizontal, 24)
         .padding(.top, 30)
@@ -159,6 +153,8 @@ struct VoiceSettingsView: View {
 
     private func voiceRow(_ voice: MiniMaxVoiceOption) -> some View {
         let isSelected = companionManager.selectedTTSVoiceID == voice.voiceID
+        let isHovered = hoveredVoiceID == voice.voiceID
+        let isPreviewingThisVoice = companionManager.previewingTTSVoiceID == voice.voiceID
 
         return HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 3) {
@@ -178,20 +174,36 @@ struct VoiceSettingsView: View {
             Button(action: {
                 companionManager.previewTTSVoice(voiceID: voice.voiceID, text: normalizedPreviewText)
             }) {
-                Image(systemName: "speaker.wave.2")
-                    .font(.system(size: 11, weight: .medium))
-                    .frame(width: 26, height: 26)
+                Group {
+                    if isPreviewingThisVoice {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Image(systemName: "speaker.wave.2")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                }
+                .frame(width: 26, height: 26)
             }
             .buttonStyle(.plain)
             .foregroundColor(DS.Colors.textTertiary)
-            .pointerCursor()
+            .pointerCursor(isEnabled: !companionManager.isPreviewingTTSVoice)
             .help("Preview this voice")
+            .disabled(companionManager.isPreviewingTTSVoice)
         }
         .padding(.horizontal, 10)
         .frame(height: 48)
-        .background(isSelected ? DS.Colors.accent.opacity(0.18) : Color.clear)
+        .background(
+            isSelected
+                ? DS.Colors.accent.opacity(0.18)
+                : (isHovered ? Color.white.opacity(0.05) : Color.clear)
+        )
         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         .contentShape(Rectangle())
+        .onHover { isHovering in
+            hoveredVoiceID = isHovering ? voice.voiceID : nil
+        }
+        .pointerCursor()
         .onTapGesture {
             companionManager.setSelectedTTSVoiceID(voice.voiceID)
         }
@@ -229,7 +241,10 @@ struct VoiceSettingsView: View {
                     Button(action: {
                         companionManager.previewTTSVoice(text: normalizedPreviewText)
                     }) {
-                        Label("Preview voice", systemImage: "play.fill")
+                        Label(
+                            companionManager.isPreviewingTTSVoice ? "Preparing preview" : "Preview voice",
+                            systemImage: companionManager.isPreviewingTTSVoice ? "hourglass" : "play.fill"
+                        )
                             .font(.system(size: 12, weight: .semibold))
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 8)
@@ -238,7 +253,22 @@ struct VoiceSettingsView: View {
                     .foregroundColor(DS.Colors.textOnAccent)
                     .background(DS.Colors.accent)
                     .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                    .pointerCursor()
+                    .pointerCursor(isEnabled: !companionManager.isPreviewingTTSVoice)
+                    .disabled(companionManager.isPreviewingTTSVoice)
+
+                    if let previewErrorMessage = companionManager.ttsVoicePreviewErrorMessage {
+                        Label(previewErrorMessage, systemImage: "exclamationmark.triangle")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(DS.Colors.warning)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    if let speechErrorMessage = companionManager.ttsSpeechErrorMessage {
+                        Label("Last response: \(speechErrorMessage)", systemImage: "exclamationmark.triangle")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(DS.Colors.warning)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
 
                 Divider().background(DS.Colors.borderSubtle)
@@ -282,28 +312,10 @@ struct VoiceSettingsView: View {
                     step: 1
                 )
 
-                HStack {
-                    Text("Emotion")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(DS.Colors.textSecondary)
-                    Spacer()
-                    Picker("Emotion", selection: Binding(
-                        get: { companionManager.ttsEmotion },
-                        set: { companionManager.setTTSEmotion($0) }
-                    )) {
-                        ForEach(supportedEmotions, id: \.id) { emotion in
-                            Text(emotion.label).tag(emotion.id)
-                        }
-                    }
-                    .labelsHidden()
-                    .frame(width: 130)
-                }
-
                 Button("Reset adjustments") {
                     companionManager.setTTSVolume(1)
                     companionManager.setTTSSpeed(1)
                     companionManager.setTTSPitch(0)
-                    companionManager.setTTSEmotion("automatic")
                 }
                 .buttonStyle(.plain)
                 .font(.system(size: 11, weight: .medium))

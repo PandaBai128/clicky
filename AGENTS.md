@@ -55,11 +55,11 @@ Worker vars: `MINIMAX_TTS_MODEL`, `MINIMAX_TTS_VOICE_ID`, `MINIMAX_TTS_VOLUME`, 
 | File | Lines | Purpose |
 |------|-------|---------|
 | `leanring_buddyApp.swift` | ~89 | Menu bar app entry point. Uses `@NSApplicationDelegateAdaptor` with `CompanionAppDelegate` which creates `MenuBarPanelManager` and starts `CompanionManager`. No main window — the app lives entirely in the status bar. |
-| `CompanionManager.swift` | ~1040 | Central state machine. Owns dictation, shortcut monitoring, screen capture, vision API, streaming TTS, and overlay management. Tracks voice state (idle/listening/processing/responding), conversation history, model selection, persisted response-length and TTS settings, and cursor visibility. Coordinates the full push-to-talk → screenshot → MiniMax → TTS → optional pointing pipeline. |
+| `CompanionManager.swift` | ~1070 | Central state machine. Owns dictation, shortcut monitoring, screen capture, vision API, streaming TTS, and overlay management. Tracks voice state (idle/listening/processing/responding), conversation history, model selection, persisted response-length and TTS settings, and cursor visibility. Coordinates the full push-to-talk → screenshot → MiniMax → TTS → optional pointing pipeline. |
 | `PointingRequestPolicy.swift` | ~105 | Transcript-only policies that request cursor guidance for visible targets and high-resolution screenshots for on-screen text extraction while excluding non-visual topics. |
 | `MenuBarPanelManager.swift` | ~259 | NSStatusItem + custom NSPanel lifecycle. Creates the menu bar icon, manages the floating companion panel, opens the standalone voice settings window, and installs click-outside-to-dismiss monitoring. |
 | `CompanionPanelView.swift` | ~1000 | SwiftUI panel content for the menu bar dropdown. Shows companion status, push-to-talk instructions, brief/normal/detailed response control, recent conversation history with copy controls, model picker, selected voice summary, permissions UI, and quit button. Dark aesthetic using `DS` design system. |
-| `VoiceSettingsView.swift` | ~344 | Searchable and source-filtered MiniMax voice browser with per-voice preview, editable preview text, and volume, speed, pitch, and emotion controls. |
+| `VoiceSettingsView.swift` | ~362 | Searchable and source-filtered MiniMax voice browser with cancellable per-voice preview, editable preview text, supported volume, speed, and pitch controls, and visible TTS errors. |
 | `VoiceSettingsWindowManager.swift` | ~53 | Owns the standalone resizable NSPanel that hosts `VoiceSettingsView`. |
 | `OverlayWindow.swift` | ~702 | Full-screen transparent overlay hosting the blue cursor, response text, waveform, and spinner. Handles cursor animation, element pointing with bezier arcs, multi-monitor coordinate mapping, and fade-out transitions. |
 | `CompanionResponseOverlay.swift` | ~217 | SwiftUI view for the response text bubble and waveform displayed next to the cursor in the overlay. |
@@ -74,7 +74,7 @@ Worker vars: `MINIMAX_TTS_MODEL`, `MINIMAX_TTS_VOICE_ID`, `MINIMAX_TTS_VOLUME`, 
 | `GlobalPushToTalkShortcutMonitor.swift` | ~132 | System-wide push-to-talk monitor. Owns the listen-only `CGEvent` tap and publishes press/release transitions. |
 | `ClaudeAPI.swift` | ~291 | MiniMax-compatible vision API client with streaming (SSE) and non-streaming modes. TLS warmup optimization, image MIME detection, conversation history support. |
 | `OpenAIAPI.swift` | ~142 | OpenAI GPT vision API client. |
-| `ElevenLabsTTSClient.swift` | ~367 | MiniMax TTS client. Streams response speech through the Worker, retains complete-file voice previews, and coordinates ordered sentence playback. |
+| `ElevenLabsTTSClient.swift` | ~442 | MiniMax TTS client. Streams response speech through the Worker, retains cancellation-safe complete-file voice previews, and coordinates ordered sentence playback. |
 | `StreamingMP3AudioPlayer.swift` | ~305 | Incremental MP3 parser and Audio Queue player used by response TTS. Reuses one output queue across sentence streams and supports immediate cancellation. |
 | `StreamingSpeechSegmenter.swift` | ~180 | Converts accumulated LLM text into complete speakable sentences, skips fenced code and point tags, and feeds ordered segments into the MiniMax TTS playback queue. |
 | `ElementLocationDetector.swift` | ~335 | Legacy Claude Computer Use coordinate helper. It is not part of the active MiniMax response pipeline. |
@@ -82,7 +82,10 @@ Worker vars: `MINIMAX_TTS_MODEL`, `MINIMAX_TTS_VOICE_ID`, `MINIMAX_TTS_VOLUME`, 
 | `ClickyAnalytics.swift` | ~121 | PostHog analytics integration for usage tracking. |
 | `WindowPositionManager.swift` | ~262 | Window placement logic, Screen Recording permission flow, and accessibility permission helpers. |
 | `AppBundleConfiguration.swift` | ~28 | Runtime configuration reader for keys stored in the app bundle Info.plist. |
-| `worker/src/index.ts` | ~468 | Cloudflare Worker proxy. Routes include MiniMax chat, complete and streaming TTS, voice catalog, and Tencent ASR signed websocket URLs. |
+| `worker/src/index.ts` | ~415 | Cloudflare Worker proxy. Routes include MiniMax chat, complete and streaming TTS, voice catalog, and Tencent ASR signed websocket URLs. |
+| `worker/src/minimax-sse-audio.ts` | ~86 | Incremental MiniMax SSE audio decoder and Cloudflare stream adapter with upstream cancellation propagation. |
+| `worker/src/minimax-tts-capabilities.ts` | ~3 | MiniMax TTS model capability checks used to gate unsupported request settings. |
+| `worker/local-server.mjs` | ~494 | Local Node proxy alternative with upstream cancellation, response backpressure handling, and the same API routes as the Worker. |
 
 ## Build & Run
 

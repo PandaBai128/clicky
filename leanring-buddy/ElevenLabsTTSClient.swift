@@ -66,10 +66,12 @@ final class ElevenLabsTTSClient: NSObject, AVAudioPlayerDelegate {
     private let streamingTTSProxyURL: URL
     private let voicesProxyURL: URL
     private let session: URLSession
+    private let audioPlaybackHandler: ((Data) throws -> Void)?
 
     /// The audio player for the current TTS playback. Kept alive so the
     /// audio finishes playing even if the caller doesn't hold a reference.
     private var audioPlayer: AVAudioPlayer?
+    private var completeSpeechGeneration = UUID()
     private var pendingStreamingSpeechRequests: [SpeechRequest] = []
     private var streamingSynthesisTask: Task<Void, Never>?
     private var streamingAudioPlayer: StreamingMP3AudioPlayer?
@@ -79,16 +81,25 @@ final class ElevenLabsTTSClient: NSObject, AVAudioPlayerDelegate {
     private var onStreamingPlaybackStarted: (() -> Void)?
     private var onStreamingSpeechFailure: ((Error) -> Void)?
 
-    init(proxyURL: String) {
+    init(
+        proxyURL: String,
+        session: URLSession? = nil,
+        audioPlaybackHandler: ((Data) throws -> Void)? = nil
+    ) {
         let ttsProxyURL = URL(string: proxyURL)!
         self.ttsProxyURL = ttsProxyURL
         self.streamingTTSProxyURL = ttsProxyURL.deletingLastPathComponent().appendingPathComponent("tts-stream")
         self.voicesProxyURL = ttsProxyURL.deletingLastPathComponent().appendingPathComponent("voices")
 
-        let configuration = URLSessionConfiguration.default
-        configuration.timeoutIntervalForRequest = 30
-        configuration.timeoutIntervalForResource = 60
-        self.session = URLSession(configuration: configuration)
+        if let session {
+            self.session = session
+        } else {
+            let configuration = URLSessionConfiguration.default
+            configuration.timeoutIntervalForRequest = 30
+            configuration.timeoutIntervalForResource = 60
+            self.session = URLSession(configuration: configuration)
+        }
+        self.audioPlaybackHandler = audioPlaybackHandler
         super.init()
     }
 
@@ -103,6 +114,7 @@ final class ElevenLabsTTSClient: NSObject, AVAudioPlayerDelegate {
         emotion: String
     ) async throws {
         stopPlayback()
+        let speechGeneration = completeSpeechGeneration
         let audioData = try await synthesizeAudio(SpeechRequest(
             text: text,
             voiceID: voiceID,
@@ -112,7 +124,14 @@ final class ElevenLabsTTSClient: NSObject, AVAudioPlayerDelegate {
             emotion: emotion
         ))
         try Task.checkCancellation()
-        try playAudioData(audioData)
+        guard speechGeneration == completeSpeechGeneration else {
+            throw CancellationError()
+        }
+        if let audioPlaybackHandler {
+            try audioPlaybackHandler(audioData)
+        } else {
+            try playAudioData(audioData)
+        }
     }
 
     func beginStreamingResponse(
@@ -124,17 +143,21 @@ final class ElevenLabsTTSClient: NSObject, AVAudioPlayerDelegate {
         hasStartedStreamingPlayback = false
         onStreamingPlaybackStarted = onPlaybackStarted
         onStreamingSpeechFailure = onFailure
+        let responseGeneration = streamingGeneration
         streamingAudioPlayer = StreamingMP3AudioPlayer(
             onPlaybackStarted: { [weak self] in
-                guard let self, !self.hasStartedStreamingPlayback else { return }
+                guard let self,
+                      responseGeneration == self.streamingGeneration,
+                      !self.hasStartedStreamingPlayback else { return }
                 self.hasStartedStreamingPlayback = true
                 self.onStreamingPlaybackStarted?()
             },
             onPlaybackFinished: { [weak self] in
-                self?.streamingAudioPlayer = nil
+                guard let self, responseGeneration == self.streamingGeneration else { return }
+                self.streamingAudioPlayer = nil
             },
             onFailure: { [weak self] error in
-                guard let self else { return }
+                guard let self, responseGeneration == self.streamingGeneration else { return }
                 self.streamingAudioPlayer = nil
                 self.onStreamingSpeechFailure?(error)
             }
@@ -210,6 +233,7 @@ final class ElevenLabsTTSClient: NSObject, AVAudioPlayerDelegate {
     private func startStreamingSynthesisIfNeeded() {
         guard streamingSynthesisTask == nil, let streamingAudioPlayer else { return }
         let synthesisGeneration = streamingGeneration
+        let streamingFailureHandler = onStreamingSpeechFailure
 
         streamingSynthesisTask = Task { [weak self] in
             guard let self else { return }
@@ -224,17 +248,23 @@ final class ElevenLabsTTSClient: NSObject, AVAudioPlayerDelegate {
                     break
                 } catch let streamingFailure as StreamingTTSFailure
                     where !streamingFailure.receivedAudioBytes {
+                    guard self.isCurrentStreamingGeneration(synthesisGeneration) else { break }
                     do {
                         let completeAudioData = try await self.synthesizeAudio(speechRequest)
+                        guard self.isCurrentStreamingGeneration(synthesisGeneration) else { break }
                         try streamingAudioPlayer.beginSegment()
                         try streamingAudioPlayer.appendAudioBytes(completeAudioData)
                         streamingAudioPlayer.endSegment()
                         clickyDebugLog("tts stream-fallback bytes=\(completeAudioData.count)")
                     } catch {
-                        self.onStreamingSpeechFailure?(error)
+                        guard self.isCurrentStreamingGeneration(synthesisGeneration),
+                              !Self.isCancellationError(error) else { break }
+                        streamingFailureHandler?(error)
                     }
                 } catch {
-                    self.onStreamingSpeechFailure?(error)
+                    guard self.isCurrentStreamingGeneration(synthesisGeneration),
+                          !Self.isCancellationError(error) else { break }
+                    streamingFailureHandler?(error)
                 }
             }
 
@@ -297,7 +327,7 @@ final class ElevenLabsTTSClient: NSObject, AVAudioPlayerDelegate {
             }
             streamingAudioPlayer.endSegment()
             clickyDebugLog("tts stream-finished bytes=\(totalAudioByteCount)")
-        } catch is CancellationError {
+        } catch let error where Self.isCancellationError(error) {
             streamingAudioPlayer.endSegment()
             throw CancellationError()
         } catch {
@@ -314,6 +344,17 @@ final class ElevenLabsTTSClient: NSObject, AVAudioPlayerDelegate {
               streamingSynthesisTask == nil,
               pendingStreamingSpeechRequests.isEmpty else { return }
         streamingAudioPlayer?.finishPlayback()
+    }
+
+    private func isCurrentStreamingGeneration(_ generation: UUID) -> Bool {
+        generation == streamingGeneration && !Task.isCancelled
+    }
+
+    private nonisolated static func isCancellationError(_ error: Error) -> Bool {
+        if error is CancellationError {
+            return true
+        }
+        return (error as? URLError)?.code == .cancelled
     }
 
     private func playAudioData(_ audioData: Data) throws {
@@ -376,6 +417,7 @@ final class ElevenLabsTTSClient: NSObject, AVAudioPlayerDelegate {
 
     /// Stops any in-progress playback immediately.
     func stopPlayback() {
+        stopCompleteSpeechPlayback()
         streamingGeneration = UUID()
         streamingSynthesisTask?.cancel()
         streamingSynthesisTask = nil
@@ -386,6 +428,12 @@ final class ElevenLabsTTSClient: NSObject, AVAudioPlayerDelegate {
         hasStartedStreamingPlayback = false
         onStreamingPlaybackStarted = nil
         onStreamingSpeechFailure = nil
+    }
+
+    /// Complete-file playback is used by voice previews. It can be cancelled
+    /// without interrupting a separate streaming response already in progress.
+    func stopCompleteSpeechPlayback() {
+        completeSpeechGeneration = UUID()
         audioPlayer?.delegate = nil
         audioPlayer?.stop()
         audioPlayer = nil

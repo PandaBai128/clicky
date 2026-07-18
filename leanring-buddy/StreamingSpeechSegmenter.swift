@@ -11,9 +11,7 @@ struct StreamingSpeechSegmenter {
     private var previousAccumulatedText = ""
     private var unprocessedText = ""
     private var pendingSpeechText = ""
-    private var allSpeakableText = ""
     private var isInsideCodeBlock = false
-    private var encounteredCodeBlock = false
 
     mutating func consume(accumulatedText: String) -> [String] {
         if !accumulatedText.hasPrefix(previousAccumulatedText) {
@@ -35,14 +33,6 @@ struct StreamingSpeechSegmenter {
             completedSegments.append(finalSegment)
         }
 
-        if encounteredCodeBlock,
-           !allSpeakableText.localizedCaseInsensitiveContains("复制"),
-           !allSpeakableText.localizedCaseInsensitiveContains("copy") {
-            let copyNotice = "内容已经写好，可以在面板里复制。"
-            allSpeakableText.append(" \(copyNotice)")
-            completedSegments.append(copyNotice)
-        }
-
         return completedSegments
     }
 
@@ -50,9 +40,7 @@ struct StreamingSpeechSegmenter {
         previousAccumulatedText = ""
         unprocessedText = ""
         pendingSpeechText = ""
-        allSpeakableText = ""
         isInsideCodeBlock = false
-        encounteredCodeBlock = false
     }
 
     private mutating func processAvailableText(allowIncompleteFenceMarker: Bool) -> [String] {
@@ -62,7 +50,6 @@ struct StreamingSpeechSegmenter {
             if unprocessedText.hasPrefix("```") {
                 unprocessedText.removeFirst(3)
                 isInsideCodeBlock.toggle()
-                encounteredCodeBlock = true
                 continue
             }
 
@@ -96,7 +83,6 @@ struct StreamingSpeechSegmenter {
         let completedSegment = pendingSpeechText.trimmingCharacters(in: .whitespacesAndNewlines)
         pendingSpeechText = ""
         guard !completedSegment.isEmpty else { return nil }
-        allSpeakableText.append(allSpeakableText.isEmpty ? completedSegment : " \(completedSegment)")
         return completedSegment
     }
 

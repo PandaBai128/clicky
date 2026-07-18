@@ -148,6 +148,8 @@ final class CompanionManager: ObservableObject {
     /// speaks again so a new response can begin immediately.
     private var currentResponseTask: Task<Void, Never>?
     private var currentResponseTaskIdentifier = UUID()
+    private var ttsVoicePreviewTask: Task<Void, Never>?
+    private var ttsVoicePreviewIdentifier = UUID()
 
     private var shortcutTransitionCancellable: AnyCancellable?
     private var voiceStateCancellable: AnyCancellable?
@@ -198,11 +200,14 @@ final class CompanionManager: ObservableObject {
         guard UserDefaults.standard.object(forKey: "miniMaxTTSPitch") != nil else { return 0 }
         return min(max(UserDefaults.standard.integer(forKey: "miniMaxTTSPitch"), -12), 12)
     }()
-    @Published var ttsEmotion: String = UserDefaults.standard.string(forKey: "miniMaxTTSEmotion")
-        ?? "automatic"
+    let ttsEmotion = "automatic"
     @Published private(set) var availableTTSVoices: [MiniMaxVoiceOption] = []
     @Published private(set) var isLoadingTTSVoices = false
     @Published private(set) var ttsVoiceCatalogErrorMessage: String?
+    @Published private(set) var isPreviewingTTSVoice = false
+    @Published private(set) var previewingTTSVoiceID: String?
+    @Published private(set) var ttsVoicePreviewErrorMessage: String?
+    @Published private(set) var ttsSpeechErrorMessage: String?
 
     func setSelectedModel(_ model: String) {
         selectedModel = model
@@ -238,11 +243,6 @@ final class CompanionManager: ObservableObject {
         UserDefaults.standard.set(normalizedPitch, forKey: "miniMaxTTSPitch")
     }
 
-    func setTTSEmotion(_ emotion: String) {
-        ttsEmotion = emotion
-        UserDefaults.standard.set(emotion, forKey: "miniMaxTTSEmotion")
-    }
-
     var selectedTTSVoiceDisplayName: String {
         availableTTSVoices.first(where: { $0.voiceID == selectedTTSVoiceID })?.displayName
             ?? selectedTTSVoiceID
@@ -265,8 +265,15 @@ final class CompanionManager: ObservableObject {
     }
 
     func previewTTSVoice(voiceID: String? = nil, text: String) {
-        elevenLabsTTSClient.stopPlayback()
-        Task {
+        cancelTTSVoicePreview()
+        let previewIdentifier = UUID()
+        ttsVoicePreviewIdentifier = previewIdentifier
+        isPreviewingTTSVoice = true
+        previewingTTSVoiceID = voiceID ?? selectedTTSVoiceID
+        ttsVoicePreviewErrorMessage = nil
+
+        ttsVoicePreviewTask = Task { [weak self] in
+            guard let self else { return }
             do {
                 try await elevenLabsTTSClient.speakText(
                     text,
@@ -276,10 +283,34 @@ final class CompanionManager: ObservableObject {
                     pitch: ttsPitch,
                     emotion: ttsEmotion
                 )
+                guard previewIdentifier == ttsVoicePreviewIdentifier else { return }
             } catch {
+                guard previewIdentifier == ttsVoicePreviewIdentifier else { return }
+                if error is CancellationError || (error as? URLError)?.code == .cancelled {
+                    return
+                }
+                ttsVoicePreviewErrorMessage = error.localizedDescription
                 print("⚠️ MiniMax voice preview error: \(error)")
             }
+            guard previewIdentifier == ttsVoicePreviewIdentifier else { return }
+            isPreviewingTTSVoice = false
+            previewingTTSVoiceID = nil
+            ttsVoicePreviewTask = nil
         }
+    }
+
+    func cancelTTSVoicePreview() {
+        ttsVoicePreviewIdentifier = UUID()
+        ttsVoicePreviewTask?.cancel()
+        ttsVoicePreviewTask = nil
+        isPreviewingTTSVoice = false
+        previewingTTSVoiceID = nil
+        elevenLabsTTSClient.stopCompleteSpeechPlayback()
+    }
+
+    private func stopAllSpeechAndCancelPreview() {
+        cancelTTSVoicePreview()
+        elevenLabsTTSClient.stopPlayback()
     }
 
     /// User preference for whether the Clicky cursor should be shown.
@@ -305,6 +336,7 @@ final class CompanionManager: ObservableObject {
     }
 
     func start() {
+        UserDefaults.standard.removeObject(forKey: "miniMaxTTSEmotion")
         refreshAllPermissions()
         clickyDebugLog("manager.start accessibility=\(hasAccessibilityPermission) screen=\(hasScreenRecordingPermission) mic=\(hasMicrophonePermission) screenContent=\(hasScreenContentPermission) all=\(allPermissionsGranted)")
         print("🔑 Clicky start — accessibility: \(hasAccessibilityPermission), screen: \(hasScreenRecordingPermission), mic: \(hasMicrophonePermission), screenContent: \(hasScreenContentPermission)")
@@ -338,6 +370,7 @@ final class CompanionManager: ObservableObject {
 
         currentResponseTask?.cancel()
         currentResponseTask = nil
+        stopAllSpeechAndCancelPreview()
         currentResponseTaskIdentifier = UUID()
         shortcutTransitionCancellable?.cancel()
         voiceStateCancellable?.cancel()
@@ -538,7 +571,7 @@ final class CompanionManager: ObservableObject {
         currentResponseTask?.cancel()
         currentResponseTask = nil
         currentResponseTaskIdentifier = UUID()
-        elevenLabsTTSClient.stopPlayback()
+        stopAllSpeechAndCancelPreview()
         voiceState = .idle
         clearDetectedElementLocation()
 
@@ -585,7 +618,7 @@ final class CompanionManager: ObservableObject {
             currentResponseTask?.cancel()
             currentResponseTask = nil
             currentResponseTaskIdentifier = UUID()
-            elevenLabsTTSClient.stopPlayback()
+            stopAllSpeechAndCancelPreview()
             voiceState = .idle
             clearDetectedElementLocation()
 
@@ -711,7 +744,7 @@ final class CompanionManager: ObservableObject {
     /// request on-screen location help.
     private func sendTranscriptToClaudeWithScreenshot(transcript: String) {
         currentResponseTask?.cancel()
-        elevenLabsTTSClient.stopPlayback()
+        stopAllSpeechAndCancelPreview()
 
         let shouldRequestPointing = PointingRequestPolicy.shouldRequestPointing(for: transcript)
         let shouldExtractScreenText = ScreenTextExtractionPolicy.isTextExtractionRequest(transcript)
@@ -758,13 +791,17 @@ final class CompanionManager: ObservableObject {
                     pitch: ttsPitch,
                     emotion: ttsEmotion
                 )
+                ttsSpeechErrorMessage = nil
                 streamingSpeechSession.begin(
                     onPlaybackStarted: { [weak self] in
                         guard let self,
                               self.currentResponseTaskIdentifier == responseTaskIdentifier else { return }
                         self.voiceState = .responding
                     },
-                    onFailure: { error in
+                    onFailure: { [weak self] error in
+                        guard let self,
+                              self.currentResponseTaskIdentifier == responseTaskIdentifier else { return }
+                        self.ttsSpeechErrorMessage = error.localizedDescription
                         ClickyAnalytics.trackTTSError(error: error.localizedDescription)
                         print("⚠️ Streaming TTS error: \(error)")
                     }

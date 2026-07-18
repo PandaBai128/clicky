@@ -1,7 +1,8 @@
 import { createHmac, randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { createServer } from "node:http";
-import { URL } from "node:url";
+import { pathToFileURL, URL } from "node:url";
+import { MiniMaxSSEAudioDecoder } from "./minimax-sse-audio.mjs";
 
 const TENCENT_ASR_HOST = "asr.cloud.tencent.com";
 
@@ -54,9 +55,11 @@ const server = createServer(async (request, response) => {
   }
 });
 
-server.listen(port, () => {
-  console.log(`Clicky local proxy listening on http://localhost:${port}`);
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  server.listen(port, () => {
+    console.log(`Clicky local proxy listening on http://localhost:${port}`);
+  });
+}
 
 async function handleChat(request, response) {
   requireEnv(["MINIMAX_API_KEY"]);
@@ -107,6 +110,7 @@ async function handleTTS(request, response) {
 
   const incomingBody = await readJSON(request);
   const text = incomingBody.text?.trim();
+  const ttsModel = env.MINIMAX_TTS_MODEL || "speech-2.8-turbo";
 
   if (!text) {
     sendJSON(response, 400, { error: "Missing text for TTS." });
@@ -120,7 +124,7 @@ async function handleTTS(request, response) {
       "content-type": "application/json",
     },
     body: JSON.stringify({
-      model: env.MINIMAX_TTS_MODEL || "speech-2.8-turbo",
+      model: ttsModel,
       text,
       stream: false,
       language_boost: "auto",
@@ -130,7 +134,9 @@ async function handleTTS(request, response) {
         speed: parseMiniMaxTTSSpeed(incomingBody.speed),
         vol: parseMiniMaxTTSVolume(incomingBody.volume ?? env.MINIMAX_TTS_VOLUME),
         pitch: parseMiniMaxTTSPitch(incomingBody.pitch),
-        ...(incomingBody.emotion ? { emotion: incomingBody.emotion } : {}),
+        ...(incomingBody.emotion && miniMaxTTSModelSupportsEmotion(ttsModel)
+          ? { emotion: incomingBody.emotion }
+          : {}),
       },
       audio_setting: {
         sample_rate: 32000,
@@ -168,111 +174,164 @@ async function handleTTS(request, response) {
   response.end(audioBuffer);
 }
 
-async function handleStreamingTTS(request, response) {
-  requireEnv(["MINIMAX_API_KEY"]);
+export async function handleStreamingTTS(
+  request,
+  response,
+  {
+    environment = env,
+    fetchImplementation = fetch,
+    ttsURL = MINIMAX_TTS_URL,
+  } = {},
+) {
+  requireEnvironmentValues(environment, ["MINIMAX_API_KEY"]);
 
   const incomingBody = await readJSON(request);
   const text = incomingBody.text?.trim();
+  const ttsModel = environment.MINIMAX_TTS_MODEL || "speech-2.8-turbo";
 
   if (!text) {
     sendJSON(response, 400, { error: "Missing text for TTS." });
     return;
   }
 
-  const upstreamResponse = await fetch(MINIMAX_TTS_URL, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${env.MINIMAX_API_KEY}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      model: env.MINIMAX_TTS_MODEL || "speech-2.8-turbo",
-      text,
-      stream: true,
-      language_boost: "auto",
-      output_format: "hex",
-      voice_setting: {
-        voice_id: incomingBody.voice_id?.trim() || env.MINIMAX_TTS_VOICE_ID || "Chinese (Mandarin)_Warm_Bestie",
-        speed: parseMiniMaxTTSSpeed(incomingBody.speed),
-        vol: parseMiniMaxTTSVolume(incomingBody.volume ?? env.MINIMAX_TTS_VOLUME),
-        pitch: parseMiniMaxTTSPitch(incomingBody.pitch),
-        ...(incomingBody.emotion ? { emotion: incomingBody.emotion } : {}),
-      },
-      audio_setting: {
-        sample_rate: 32000,
-        bitrate: 128000,
-        format: "mp3",
-        channel: 1,
-      },
-    }),
-  });
-
-  if (!upstreamResponse.ok || !upstreamResponse.body) {
-    const errorBody = await upstreamResponse.text();
-    console.error("[local proxy] MiniMax streaming TTS error:", errorBody);
-    sendText(response, upstreamResponse.status, errorBody, "application/json");
-    return;
-  }
-
-  response.writeHead(200, {
-    "content-type": "audio/mpeg",
-    "cache-control": "no-cache",
-  });
-
-  const decoder = new TextDecoder();
-  let pendingText = "";
-  let hasStreamedAudio = false;
+  const upstreamAbortController = new AbortController();
+  const abortWhenRequestClosesEarly = () => {
+    if (request.aborted) {
+      upstreamAbortController.abort();
+    }
+  };
+  const abortWhenResponseClosesEarly = () => {
+    if (!response.writableEnded) {
+      upstreamAbortController.abort();
+    }
+  };
+  request.once("aborted", abortWhenRequestClosesEarly);
+  request.once("close", abortWhenRequestClosesEarly);
+  response.once("close", abortWhenResponseClosesEarly);
 
   try {
-    for await (const chunk of upstreamResponse.body) {
-      pendingText += decoder.decode(chunk, { stream: true });
-      const lines = pendingText.split("\n");
-      pendingText = lines.pop() || "";
+    const upstreamResponse = await fetchImplementation(ttsURL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${environment.MINIMAX_API_KEY}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: ttsModel,
+        text,
+        stream: true,
+        language_boost: "auto",
+        output_format: "hex",
+        voice_setting: {
+          voice_id: incomingBody.voice_id?.trim() || environment.MINIMAX_TTS_VOICE_ID || "Chinese (Mandarin)_Warm_Bestie",
+          speed: parseMiniMaxTTSSpeed(incomingBody.speed),
+          vol: parseMiniMaxTTSVolume(incomingBody.volume ?? environment.MINIMAX_TTS_VOLUME),
+          pitch: parseMiniMaxTTSPitch(incomingBody.pitch),
+          ...(incomingBody.emotion && miniMaxTTSModelSupportsEmotion(ttsModel)
+            ? { emotion: incomingBody.emotion }
+            : {}),
+        },
+        audio_setting: {
+          sample_rate: 32000,
+          bitrate: 128000,
+          format: "mp3",
+          channel: 1,
+        },
+      }),
+      signal: upstreamAbortController.signal,
+    });
 
-      for (const line of lines) {
-        const result = writeMiniMaxStreamingAudioLine(line, response, hasStreamedAudio);
-        hasStreamedAudio = result.hasStreamedAudio;
-      }
+    if (!upstreamResponse.ok || !upstreamResponse.body) {
+      const errorBody = await upstreamResponse.text();
+      console.error("[local proxy] MiniMax streaming TTS error:", errorBody);
+      sendText(response, upstreamResponse.status, errorBody, "application/json");
+      return;
     }
 
-    pendingText += decoder.decode();
-    if (pendingText.trim()) {
-      writeMiniMaxStreamingAudioLine(pendingText, response, hasStreamedAudio);
-    }
+    response.writeHead(200, {
+      "content-type": "audio/mpeg",
+      "cache-control": "no-cache",
+    });
+    await pipeMiniMaxStreamingAudioToNodeResponse(
+      upstreamResponse.body,
+      response,
+      upstreamAbortController.signal,
+    );
     response.end();
   } catch (error) {
+    if (upstreamAbortController.signal.aborted) {
+      if (!response.destroyed && !response.writableEnded) {
+        response.destroy();
+      }
+      return;
+    }
     console.error("[local proxy] MiniMax streaming TTS decode error:", error);
-    response.destroy(error);
+    if (response.headersSent) {
+      response.destroy(error);
+    } else {
+      sendJSON(response, 502, { error: String(error) });
+    }
+  } finally {
+    request.off("aborted", abortWhenRequestClosesEarly);
+    request.off("close", abortWhenRequestClosesEarly);
+    response.off("close", abortWhenResponseClosesEarly);
   }
 }
 
-function writeMiniMaxStreamingAudioLine(line, response, hasStreamedAudio) {
-  const trimmedLine = line.trim();
-  if (!trimmedLine.startsWith("data:")) {
-    return { hasStreamedAudio };
+export async function pipeMiniMaxStreamingAudioToNodeResponse(
+  upstreamBody,
+  response,
+  abortSignal,
+) {
+  const upstreamReader = upstreamBody.getReader();
+  const decoder = new MiniMaxSSEAudioDecoder();
+  const cancelReader = () => {
+    void upstreamReader.cancel().catch(() => {});
+  };
+  abortSignal.addEventListener("abort", cancelReader, { once: true });
+
+  if (abortSignal.aborted) {
+    await upstreamReader.cancel().catch(() => {});
+    upstreamReader.releaseLock();
+    return;
   }
 
-  const payload = JSON.parse(trimmedLine.slice(5));
-  if (payload.base_resp?.status_code && payload.base_resp.status_code !== 0) {
-    throw new Error(payload.base_resp.status_msg || "MiniMax streaming TTS failed.");
+  try {
+    while (!abortSignal.aborted) {
+      const { done, value } = await upstreamReader.read();
+      const audioChunks = done ? decoder.finish() : decoder.consume(value);
+      for (const audioChunk of audioChunks) {
+        if (!response.write(audioChunk)) {
+          await waitForResponseDrain(response, abortSignal);
+          if (abortSignal.aborted) {
+            return;
+          }
+        }
+      }
+      if (done) {
+        return;
+      }
+    }
+  } finally {
+    abortSignal.removeEventListener("abort", cancelReader);
+    upstreamReader.releaseLock();
   }
+}
 
-  const audioHex = payload.data?.audio?.trim();
-  if (!audioHex) {
-    return { hasStreamedAudio };
-  }
+function waitForResponseDrain(response, abortSignal) {
+  return new Promise((resolve) => {
+    const finishWaiting = () => {
+      response.off("drain", finishWaiting);
+      abortSignal.removeEventListener("abort", finishWaiting);
+      resolve();
+    };
+    response.once("drain", finishWaiting);
+    abortSignal.addEventListener("abort", finishWaiting, { once: true });
+  });
+}
 
-  if (payload.data?.status === 1) {
-    response.write(Buffer.from(audioHex, "hex"));
-    return { hasStreamedAudio: true };
-  }
-
-  // Status 2 repeats the complete file after the status-1 chunks. Only use
-  // it as a fallback when MiniMax returned no incremental audio.
-  if (!hasStreamedAudio) {
-    response.write(Buffer.from(audioHex, "hex"));
-  }
-  return { hasStreamedAudio };
+export function miniMaxTTSModelSupportsEmotion(model) {
+  return /^speech-(?:01|02|2\.6)-(?:hd|turbo)$/.test(String(model).trim().toLowerCase());
 }
 
 async function handleVoices(response) {
@@ -374,7 +433,11 @@ function loadEnvironment() {
 }
 
 function requireEnv(requiredKeys) {
-  const missingKeys = requiredKeys.filter((key) => !env[key]);
+  requireEnvironmentValues(env, requiredKeys);
+}
+
+function requireEnvironmentValues(environment, requiredKeys) {
+  const missingKeys = requiredKeys.filter((key) => !environment[key]);
   if (missingKeys.length > 0) {
     throw new Error(`Missing environment variables: ${missingKeys.join(", ")}`);
   }
