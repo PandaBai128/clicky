@@ -1,6 +1,6 @@
 # Clicky - Agent Instructions
 
-<!-- This is the single source of truth for all AI coding agents. CLAUDE.md is a symlink to this file. -->
+<!-- This is the single source of truth for all AI coding agents. -->
 <!-- AGENTS.md spec: https://github.com/agentsmd/agents.md — supported by Claude Code, Cursor, Copilot, Gemini CLI, and others. -->
 
 ## Overview
@@ -20,7 +20,7 @@ API keys live in the proxy layer: `worker/.dev.vars` for local development or Cl
 - **Screen Capture**: ScreenCaptureKit (macOS 14.2+), multi-monitor support
 - **Voice Input**: Push-to-talk via `AVAudioEngine` + pluggable transcription-provider layer. System-wide keyboard shortcut via listen-only CGEvent tap.
 - **Element Pointing**: The vision model embeds normalized `[POINT_V2:x,y:label:screenN]` tags using a fixed 0–1000 coordinate space. The overlay parses these, maps coordinates to the correct monitor, and animates the blue cursor along a bezier arc to the target. Legacy `[POINT:...]` tags are stripped but never move the cursor.
-- **Concurrency**: `@MainActor` isolation, async/await throughout
+- **Concurrency**: UI state is isolated to `@MainActor`. Streaming MP3 parsing and Audio Queue lifecycle work run on dedicated serial queues so playback and cancellation cannot block the menu bar UI.
 
 ### API Proxy (Local Node or Cloudflare Worker)
 
@@ -70,7 +70,7 @@ Optional proxy configuration: `MINIMAX_API_HOST`, `MINIMAX_CHAT_MODEL`, `MINIMAX
 | `GlobalPushToTalkShortcutMonitor.swift` | ~179 | System-wide push-to-talk monitor. Owns the listen-only `CGEvent` tap and publishes press/release transitions. |
 | `ClaudeAPI.swift` | ~295 | MiniMax-compatible vision API client with streaming (SSE) and non-streaming modes. TLS warmup optimization, image MIME detection, conversation history support. |
 | `ElevenLabsTTSClient.swift` | ~448 | MiniMax TTS client. Streams response speech through the Worker, retains cancellation-safe complete-file voice previews, and coordinates ordered sentence playback. |
-| `StreamingMP3AudioPlayer.swift` | ~305 | Incremental MP3 parser and Audio Queue player used by response TTS. Reuses one output queue across sentence streams and supports immediate cancellation. |
+| `StreamingMP3AudioPlayer.swift` | ~375 | Incremental MP3 parser and Audio Queue player used by response TTS. Runs parsing, queue callbacks, and cancellation cleanup off the main actor while reusing one output queue across sentence streams. |
 | `StreamingSpeechSegmenter.swift` | ~163 | Converts accumulated LLM text into complete speakable sentences, skips fenced code and point tags, and feeds ordered segments into the MiniMax TTS playback queue. |
 | `DesignSystem.swift` | ~880 | Design system tokens — colors, corner radii, shared styles. All UI references `DS.Colors`, `DS.CornerRadius`, etc. |
 | `WindowPositionManager.swift` | ~262 | Window placement logic, Screen Recording permission flow, and accessibility permission helpers. |

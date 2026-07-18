@@ -9,7 +9,7 @@ import Foundation
 /// Incrementally parses MP3 bytes and feeds decoded packets to one Audio Queue.
 /// A fresh parser is used for each synthesized sentence while the output queue
 /// stays alive, preventing sentence downloads from blocking current playback.
-final class StreamingMP3AudioPlayer {
+nonisolated final class StreamingMP3AudioPlayer: @unchecked Sendable {
     enum PlayerError: LocalizedError {
         case audioFileStreamOpenFailed(OSStatus)
         case audioFileStreamParseFailed(OSStatus)
@@ -38,6 +38,15 @@ final class StreamingMP3AudioPlayer {
     private let onPlaybackStarted: () -> Void
     private let onPlaybackFinished: () -> Void
     private let onFailure: (Error) -> Void
+    private let cancellationCleanupHandler: () -> Void
+    private let audioProcessingQueue = DispatchQueue(
+        label: "com.nathan.clicky.streaming-audio-processing",
+        qos: .userInitiated
+    )
+    private let audioQueueCallbackQueue = DispatchQueue(
+        label: "com.nathan.clicky.streaming-audio-callbacks",
+        qos: .userInitiated
+    )
 
     private var audioFileStream: AudioFileStreamID?
     private var audioQueue: AudioQueueRef?
@@ -51,16 +60,36 @@ final class StreamingMP3AudioPlayer {
         playbackVolume: Float = 1,
         onPlaybackStarted: @escaping () -> Void,
         onPlaybackFinished: @escaping () -> Void,
-        onFailure: @escaping (Error) -> Void
+        onFailure: @escaping (Error) -> Void,
+        cancellationCleanupHandler: @escaping () -> Void = {}
     ) {
         self.playbackVolume = min(max(playbackVolume, 0), 1)
         self.onPlaybackStarted = onPlaybackStarted
         self.onPlaybackFinished = onPlaybackFinished
         self.onFailure = onFailure
+        self.cancellationCleanupHandler = cancellationCleanupHandler
     }
 
-    func beginSegment() throws {
-        endSegment()
+    func beginSegment() async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            audioProcessingQueue.async {
+                do {
+                    try self.beginSegmentSynchronously()
+                    continuation.resume()
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    private func beginSegmentSynchronously() throws {
+        endSegmentSynchronously()
+
+        stateLock.lock()
+        let shouldCancel = isCancelled
+        stateLock.unlock()
+        guard !shouldCancel else { throw CancellationError() }
 
         var openedAudioFileStream: AudioFileStreamID?
         let status = AudioFileStreamOpen(
@@ -76,8 +105,27 @@ final class StreamingMP3AudioPlayer {
         audioFileStream = openedAudioFileStream
     }
 
-    func appendAudioBytes(_ audioData: Data) throws {
+    func appendAudioBytes(_ audioData: Data) async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            audioProcessingQueue.async {
+                do {
+                    try self.appendAudioBytesSynchronously(audioData)
+                    continuation.resume()
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    private func appendAudioBytesSynchronously(_ audioData: Data) throws {
         guard !audioData.isEmpty, let audioFileStream else { return }
+
+        stateLock.lock()
+        let shouldCancel = isCancelled
+        stateLock.unlock()
+        guard !shouldCancel else { throw CancellationError() }
+
         let status = audioData.withUnsafeBytes { bytes in
             AudioFileStreamParseBytes(
                 audioFileStream,
@@ -91,7 +139,16 @@ final class StreamingMP3AudioPlayer {
         }
     }
 
-    func endSegment() {
+    func endSegment() async {
+        await withCheckedContinuation { continuation in
+            audioProcessingQueue.async {
+                self.endSegmentSynchronously()
+                continuation.resume()
+            }
+        }
+    }
+
+    private func endSegmentSynchronously() {
         guard let audioFileStream else { return }
         AudioFileStreamParseBytes(audioFileStream, 0, nil, [])
         AudioFileStreamClose(audioFileStream)
@@ -99,7 +156,13 @@ final class StreamingMP3AudioPlayer {
     }
 
     func finishPlayback() {
-        endSegment()
+        audioProcessingQueue.async {
+            self.finishPlaybackSynchronously()
+        }
+    }
+
+    private func finishPlaybackSynchronously() {
+        endSegmentSynchronously()
         stateLock.lock()
         isInputFinished = true
         let shouldComplete = pendingAudioQueueBufferCount == 0
@@ -119,8 +182,11 @@ final class StreamingMP3AudioPlayer {
         isCancelled = true
         stateLock.unlock()
 
-        endSegment()
-        disposeAudioQueue(immediately: true)
+        audioProcessingQueue.async {
+            self.cancellationCleanupHandler()
+            self.endSegmentSynchronously()
+            self.disposeAudioQueue(immediately: true)
+        }
     }
 
     fileprivate func handleProperty(
@@ -152,7 +218,7 @@ final class StreamingMP3AudioPlayer {
             &createdAudioQueue,
             &audioFormat,
             0,
-            DispatchQueue.main
+            audioQueueCallbackQueue
         ) { [weak self] _, _ in
             self?.audioQueueFinishedBuffer()
         }
@@ -242,9 +308,11 @@ final class StreamingMP3AudioPlayer {
         hasCompleted = true
         stateLock.unlock()
 
-        disposeAudioQueue(immediately: false)
-        DispatchQueue.main.async { [onPlaybackFinished] in
-            onPlaybackFinished()
+        audioProcessingQueue.async {
+            self.disposeAudioQueue(immediately: false)
+            DispatchQueue.main.async { [onPlaybackFinished = self.onPlaybackFinished] in
+                onPlaybackFinished()
+            }
         }
     }
 
@@ -257,10 +325,12 @@ final class StreamingMP3AudioPlayer {
         hasCompleted = true
         stateLock.unlock()
 
-        endSegment()
-        disposeAudioQueue(immediately: true)
-        DispatchQueue.main.async { [onFailure] in
-            onFailure(error)
+        audioProcessingQueue.async {
+            self.endSegmentSynchronously()
+            self.disposeAudioQueue(immediately: true)
+            DispatchQueue.main.async { [onFailure = self.onFailure] in
+                onFailure(error)
+            }
         }
     }
 
@@ -278,7 +348,7 @@ final class StreamingMP3AudioPlayer {
     }
 }
 
-private func streamingMP3PropertyListener(
+private nonisolated func streamingMP3PropertyListener(
     clientData: UnsafeMutableRawPointer,
     audioFileStream: AudioFileStreamID,
     propertyID: AudioFileStreamPropertyID,
@@ -288,7 +358,7 @@ private func streamingMP3PropertyListener(
     player.handleProperty(audioFileStream: audioFileStream, propertyID: propertyID)
 }
 
-private func streamingMP3PacketListener(
+private nonisolated func streamingMP3PacketListener(
     clientData: UnsafeMutableRawPointer,
     numberBytes: UInt32,
     numberPackets: UInt32,

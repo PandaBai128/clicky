@@ -106,6 +106,26 @@ struct TTSCancellationTests {
         client.stopPlayback()
     }
 
+    @Test func streamingPlayerCancellationReturnsBeforeSlowAudioCleanupFinishes() {
+        let cleanupFinished = DispatchSemaphore(value: 0)
+        let player = StreamingMP3AudioPlayer(
+            onPlaybackStarted: {},
+            onPlaybackFinished: {},
+            onFailure: { _ in },
+            cancellationCleanupHandler: {
+                Thread.sleep(forTimeInterval: 0.3)
+                cleanupFinished.signal()
+            }
+        )
+
+        let cancellationStartedAt = Date()
+        player.cancel()
+        let cancellationDuration = Date().timeIntervalSince(cancellationStartedAt)
+
+        #expect(cancellationDuration < 0.05)
+        #expect(cleanupFinished.wait(timeout: .now() + 1) == .success)
+    }
+
     private func makeClient(
         audioPlaybackHandler: @escaping (Data) throws -> Void
     ) -> ElevenLabsTTSClient {

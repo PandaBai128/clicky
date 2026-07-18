@@ -252,9 +252,9 @@ final class ElevenLabsTTSClient: NSObject, AVAudioPlayerDelegate {
                     do {
                         let completeAudioData = try await self.synthesizeAudio(speechRequest)
                         guard self.isCurrentStreamingGeneration(synthesisGeneration) else { break }
-                        try streamingAudioPlayer.beginSegment()
-                        try streamingAudioPlayer.appendAudioBytes(completeAudioData)
-                        streamingAudioPlayer.endSegment()
+                        try await streamingAudioPlayer.beginSegment()
+                        try await streamingAudioPlayer.appendAudioBytes(completeAudioData)
+                        await streamingAudioPlayer.endSegment()
                         clickyDebugLog("tts stream-fallback bytes=\(completeAudioData.count)")
                     } catch {
                         guard self.isCurrentStreamingGeneration(synthesisGeneration),
@@ -300,7 +300,7 @@ final class ElevenLabsTTSClient: NSObject, AVAudioPlayerDelegate {
                               userInfo: [NSLocalizedDescriptionKey: "Streaming TTS API error (\(httpResponse.statusCode))"])
             }
 
-            try streamingAudioPlayer.beginSegment()
+            try await streamingAudioPlayer.beginSegment()
             var pendingAudioData = Data()
             pendingAudioData.reserveCapacity(8_192)
             var totalAudioByteCount = 0
@@ -311,7 +311,7 @@ final class ElevenLabsTTSClient: NSObject, AVAudioPlayerDelegate {
                 if pendingAudioData.count >= 8_192 {
                     receivedAudioBytes = true
                     totalAudioByteCount += pendingAudioData.count
-                    try streamingAudioPlayer.appendAudioBytes(pendingAudioData)
+                    try await streamingAudioPlayer.appendAudioBytes(pendingAudioData)
                     pendingAudioData.removeAll(keepingCapacity: true)
                 }
             }
@@ -319,19 +319,19 @@ final class ElevenLabsTTSClient: NSObject, AVAudioPlayerDelegate {
             if !pendingAudioData.isEmpty {
                 receivedAudioBytes = true
                 totalAudioByteCount += pendingAudioData.count
-                try streamingAudioPlayer.appendAudioBytes(pendingAudioData)
+                try await streamingAudioPlayer.appendAudioBytes(pendingAudioData)
             }
             guard receivedAudioBytes else {
                 throw NSError(domain: "MiniMaxTTS", code: -2,
                               userInfo: [NSLocalizedDescriptionKey: "MiniMax returned no streaming audio"])
             }
-            streamingAudioPlayer.endSegment()
+            await streamingAudioPlayer.endSegment()
             clickyDebugLog("tts stream-finished bytes=\(totalAudioByteCount)")
         } catch let error where Self.isCancellationError(error) {
-            streamingAudioPlayer.endSegment()
+            await streamingAudioPlayer.endSegment()
             throw CancellationError()
         } catch {
-            streamingAudioPlayer.endSegment()
+            await streamingAudioPlayer.endSegment()
             throw StreamingTTSFailure(
                 underlyingError: error,
                 receivedAudioBytes: receivedAudioBytes
